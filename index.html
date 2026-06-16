@@ -1,0 +1,662 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Google Sheets Editor</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', sans-serif;
+      background: #f0f2f5;
+      color: #333;
+      min-height: 100vh;
+    }
+
+    header {
+      background: #1a73e8;
+      color: white;
+      padding: 14px 24px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+    }
+
+    header svg { flex-shrink: 0; }
+    header h1 { font-size: 1.2rem; font-weight: 600; }
+
+    #setup-panel {
+      max-width: 680px;
+      margin: 48px auto;
+      background: white;
+      border-radius: 12px;
+      padding: 36px;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.1);
+    }
+
+    #setup-panel h2 { font-size: 1.3rem; margin-bottom: 8px; }
+    #setup-panel p { color: #666; font-size: 0.9rem; margin-bottom: 24px; }
+
+    .field { margin-bottom: 16px; }
+    .field label {
+      display: block;
+      font-size: 0.85rem;
+      font-weight: 600;
+      margin-bottom: 6px;
+      color: #555;
+    }
+    .field input {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #ccc;
+      border-radius: 8px;
+      font-size: 0.95rem;
+      transition: border-color 0.2s;
+    }
+    .field input:focus {
+      outline: none;
+      border-color: #1a73e8;
+      box-shadow: 0 0 0 3px rgba(26,115,232,0.15);
+    }
+
+    .hint {
+      font-size: 0.8rem;
+      color: #888;
+      margin-top: 5px;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 20px;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 0.95rem;
+      font-weight: 600;
+      transition: background 0.2s, transform 0.1s;
+    }
+    .btn:active { transform: scale(0.98); }
+    .btn-primary { background: #1a73e8; color: white; }
+    .btn-primary:hover { background: #1558b0; }
+    .btn-success { background: #34a853; color: white; }
+    .btn-success:hover { background: #2a8042; }
+    .btn-secondary { background: #f1f3f4; color: #333; }
+    .btn-secondary:hover { background: #e2e5e9; }
+    .btn-danger { background: #ea4335; color: white; }
+    .btn-danger:hover { background: #c5221f; }
+
+    #auth-btn-container { margin-top: 24px; text-align: center; }
+
+    #main-panel { display: none; padding: 24px; }
+
+    #toolbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 16px;
+      background: white;
+      padding: 12px 16px;
+      border-radius: 10px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+    }
+
+    #sheet-title {
+      font-weight: 700;
+      font-size: 1.1rem;
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    #sheet-select {
+      padding: 7px 10px;
+      border: 1px solid #ccc;
+      border-radius: 7px;
+      font-size: 0.9rem;
+      cursor: pointer;
+    }
+
+    #status {
+      font-size: 0.85rem;
+      color: #555;
+      padding: 4px 10px;
+      background: #f1f3f4;
+      border-radius: 6px;
+    }
+    #status.saving { color: #f29900; background: #fef7e0; }
+    #status.saved  { color: #34a853; background: #e6f4ea; }
+    #status.error  { color: #ea4335; background: #fce8e6; }
+
+    #table-container {
+      background: white;
+      border-radius: 10px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+      overflow: auto;
+      max-height: calc(100vh - 200px);
+    }
+
+    table {
+      border-collapse: collapse;
+      min-width: 100%;
+      font-size: 0.88rem;
+    }
+
+    thead th {
+      background: #f8f9fa;
+      border: 1px solid #e0e0e0;
+      padding: 8px 12px;
+      text-align: left;
+      font-weight: 600;
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      white-space: nowrap;
+      color: #555;
+    }
+
+    thead th.row-num {
+      background: #f0f0f0;
+      color: #999;
+      font-weight: 400;
+      width: 48px;
+      min-width: 48px;
+      text-align: center;
+    }
+
+    tbody td {
+      border: 1px solid #e8e8e8;
+      padding: 0;
+      min-width: 120px;
+      max-width: 300px;
+      position: relative;
+    }
+
+    tbody td.row-num {
+      background: #fafafa;
+      color: #bbb;
+      text-align: center;
+      font-size: 0.8rem;
+      padding: 6px;
+      min-width: 48px;
+      max-width: 48px;
+      user-select: none;
+    }
+
+    tbody td input {
+      width: 100%;
+      border: none;
+      padding: 7px 10px;
+      font-size: 0.88rem;
+      font-family: inherit;
+      background: transparent;
+      outline: none;
+    }
+
+    tbody td input:focus {
+      background: #e8f0fe;
+      box-shadow: inset 0 0 0 2px #1a73e8;
+    }
+
+    tbody td.modified input { background: #fffde7; }
+
+    #add-row-btn {
+      display: block;
+      width: 100%;
+      padding: 8px;
+      background: #f8f9fa;
+      border: none;
+      border-top: 1px solid #e0e0e0;
+      color: #1a73e8;
+      cursor: pointer;
+      font-size: 0.85rem;
+      text-align: center;
+      transition: background 0.15s;
+    }
+    #add-row-btn:hover { background: #e8f0fe; }
+
+    .loading {
+      text-align: center;
+      padding: 48px;
+      color: #888;
+    }
+    .loading svg { animation: spin 1s linear infinite; margin-bottom: 12px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .step {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 10px 0;
+      border-bottom: 1px solid #f0f0f0;
+    }
+    .step:last-child { border-bottom: none; }
+    .step-num {
+      background: #1a73e8;
+      color: white;
+      border-radius: 50%;
+      width: 22px;
+      height: 22px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.75rem;
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+    .step-text { font-size: 0.88rem; color: #555; line-height: 1.5; }
+    .step-text a { color: #1a73e8; }
+
+    #guide-toggle {
+      font-size: 0.82rem;
+      color: #1a73e8;
+      cursor: pointer;
+      text-decoration: underline;
+      margin-bottom: 12px;
+      display: inline-block;
+    }
+    #guide-content { display: none; }
+  </style>
+</head>
+<body>
+
+<header>
+  <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+    <rect x="3" y="3" width="18" height="18" rx="3" fill="white" fill-opacity="0.3"/>
+    <rect x="3" y="3" width="18" height="18" rx="3" stroke="white" stroke-width="1.5"/>
+    <line x1="3" y1="9" x2="21" y2="9" stroke="white" stroke-width="1.2"/>
+    <line x1="3" y1="15" x2="21" y2="15" stroke="white" stroke-width="1.2"/>
+    <line x1="9" y1="3" x2="9" y2="21" stroke="white" stroke-width="1.2"/>
+    <line x1="15" y1="3" x2="15" y2="21" stroke="white" stroke-width="1.2"/>
+  </svg>
+  <h1>Google Sheets Editor</h1>
+</header>
+
+<!-- Setup Panel -->
+<div id="setup-panel">
+  <h2>Google Sheets GUI 편집기</h2>
+  <p>Google Sheets 링크를 붙여넣으면 바로 수정할 수 있는 테이블로 표시됩니다.</p>
+
+  <span id="guide-toggle" onclick="toggleGuide()">▶ 처음 사용하시나요? 설정 가이드 보기</span>
+  <div id="guide-content">
+    <div class="step">
+      <div class="step-num">1</div>
+      <div class="step-text"><a href="https://console.cloud.google.com/apis/library/sheets.googleapis.com" target="_blank">Google Cloud Console</a>에서 Google Sheets API를 활성화하세요.</div>
+    </div>
+    <div class="step">
+      <div class="step-num">2</div>
+      <div class="step-text">APIs & Services → 사용자 인증 정보 → <b>OAuth 2.0 클라이언트 ID</b> 생성 (유형: 웹 애플리케이션)<br/>승인된 JavaScript 원본에 <code>http://localhost:8080</code> 또는 사용 중인 주소 추가</div>
+    </div>
+    <div class="step">
+      <div class="step-num">3</div>
+      <div class="step-text">생성된 <b>클라이언트 ID</b>를 아래에 붙여넣으세요.</div>
+    </div>
+    <div class="step">
+      <div class="step-num">4</div>
+      <div class="step-text">수정하려는 <b>Google Sheets 링크</b>를 붙여넣고 로그인하면 됩니다.</div>
+    </div>
+  </div>
+
+  <br/>
+
+  <div class="field">
+    <label>Google OAuth 클라이언트 ID</label>
+    <input type="text" id="client-id-input" placeholder="xxxxxxxxxx.apps.googleusercontent.com" />
+    <div class="hint">Google Cloud Console에서 발급한 OAuth 2.0 클라이언트 ID</div>
+  </div>
+
+  <div class="field">
+    <label>Google Sheets URL</label>
+    <input type="text" id="sheet-url-input" placeholder="https://docs.google.com/spreadsheets/d/..." />
+    <div class="hint">스프레드시트 공유 링크 또는 주소창 URL</div>
+  </div>
+
+  <div id="auth-btn-container">
+    <button class="btn btn-primary" onclick="startAuth()">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12.545 10.239v3.821h5.445c-.712 2.315-2.647 3.972-5.445 3.972a6.033 6.033 0 1 1 0-12.064c1.498 0 2.866.549 3.921 1.453l2.814-2.814A9.969 9.969 0 0 0 12.545 3C7.021 3 2.543 7.477 2.543 13s4.478 10 10.002 10c8.396 0 10.249-7.85 9.426-11.748l-9.426-.013z"/></svg>
+      Google 계정으로 로그인하고 시작
+    </button>
+  </div>
+</div>
+
+<!-- Main Editor Panel -->
+<div id="main-panel">
+  <div id="toolbar">
+    <div id="sheet-title">스프레드시트</div>
+    <select id="sheet-select" onchange="loadSheet()"></select>
+    <span id="status">준비</span>
+    <button class="btn btn-success" onclick="saveAll()">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M17 3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V7l-4-4zm-5 16c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3zm3-10H5V5h10v4z"/></svg>
+      저장
+    </button>
+    <button class="btn btn-secondary" onclick="reloadData()">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M17.65 6.35A7.958 7.958 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+      새로고침
+    </button>
+    <button class="btn btn-danger" onclick="logout()">로그아웃</button>
+  </div>
+
+  <div id="table-container">
+    <div class="loading" id="loading">
+      <svg width="32" height="32" viewBox="0 0 24 24" fill="#1a73e8"><path d="M12 6v3l4-4-4-4v3c-4.42 0-8 3.58-8 8 0 1.57.46 3.03 1.24 4.26L6.7 14.8A5.87 5.87 0 0 1 6 12c0-3.31 2.69-6 6-6zm6.76 1.74L17.3 9.2c.44.84.7 1.79.7 2.8 0 3.31-2.69 6-6 6v-3l-4 4 4 4v-3c4.42 0 8-3.58 8-8 0-1.57-.46-3.03-1.24-4.26z"/></svg>
+      <div>데이터 불러오는 중...</div>
+    </div>
+    <table id="data-table" style="display:none">
+      <thead id="table-head"></thead>
+      <tbody id="table-body"></tbody>
+    </table>
+    <button id="add-row-btn" style="display:none" onclick="addRow()">+ 행 추가</button>
+  </div>
+</div>
+
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script>
+  const SCOPES = 'https://www.googleapis.com/auth/spreadsheets';
+  let tokenClient = null;
+  let accessToken = null;
+  let spreadsheetId = null;
+  let currentSheetName = null;
+  let originalData = [];
+  let modifiedCells = new Set();
+
+  function toggleGuide() {
+    const content = document.getElementById('guide-content');
+    const toggle = document.getElementById('guide-toggle');
+    const visible = content.style.display === 'block';
+    content.style.display = visible ? 'none' : 'block';
+    toggle.textContent = (visible ? '▶' : '▼') + ' 처음 사용하시나요? 설정 가이드 보기';
+  }
+
+  function extractSheetId(url) {
+    const m = url.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+    return m ? m[1] : null;
+  }
+
+  function startAuth() {
+    const clientId = document.getElementById('client-id-input').value.trim();
+    const sheetUrl = document.getElementById('sheet-url-input').value.trim();
+
+    if (!clientId) return alert('클라이언트 ID를 입력해주세요.');
+    if (!sheetUrl) return alert('스프레드시트 URL을 입력해주세요.');
+
+    spreadsheetId = extractSheetId(sheetUrl);
+    if (!spreadsheetId) return alert('올바른 Google Sheets URL을 입력해주세요.\n예: https://docs.google.com/spreadsheets/d/...');
+
+    localStorage.setItem('gse_client_id', clientId);
+    localStorage.setItem('gse_sheet_url', sheetUrl);
+
+    tokenClient = google.accounts.oauth2.initTokenClient({
+      client_id: clientId,
+      scope: SCOPES,
+      callback: (resp) => {
+        if (resp.error) { alert('인증 실패: ' + resp.error); return; }
+        accessToken = resp.access_token;
+        showMainPanel();
+        fetchSpreadsheetMeta();
+      }
+    });
+    tokenClient.requestAccessToken({ prompt: 'consent' });
+  }
+
+  function showMainPanel() {
+    document.getElementById('setup-panel').style.display = 'none';
+    document.getElementById('main-panel').style.display = 'block';
+  }
+
+  async function apiFetch(url, options = {}) {
+    const res = await fetch(url, {
+      ...options,
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+        ...(options.headers || {})
+      }
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error?.message || res.statusText);
+    }
+    return res.json();
+  }
+
+  async function fetchSpreadsheetMeta() {
+    try {
+      const data = await apiFetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=properties.title,sheets.properties`
+      );
+      document.getElementById('sheet-title').textContent = data.properties.title;
+
+      const select = document.getElementById('sheet-select');
+      select.innerHTML = '';
+      data.sheets.forEach(s => {
+        const opt = document.createElement('option');
+        opt.value = s.properties.title;
+        opt.textContent = s.properties.title;
+        select.appendChild(opt);
+      });
+
+      currentSheetName = select.value;
+      await loadSheet();
+    } catch (e) {
+      setStatus('메타데이터 오류: ' + e.message, 'error');
+    }
+  }
+
+  async function loadSheet() {
+    currentSheetName = document.getElementById('sheet-select').value;
+    modifiedCells.clear();
+    showLoading(true);
+    try {
+      const data = await apiFetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(currentSheetName)}`
+      );
+      const values = data.values || [];
+      originalData = values.map(r => [...r]);
+      renderTable(values);
+      setStatus('불러오기 완료', 'saved');
+    } catch (e) {
+      setStatus('불러오기 실패: ' + e.message, 'error');
+    } finally {
+      showLoading(false);
+    }
+  }
+
+  function renderTable(values) {
+    const thead = document.getElementById('table-head');
+    const tbody = document.getElementById('table-body');
+    thead.innerHTML = '';
+    tbody.innerHTML = '';
+
+    if (!values.length) {
+      tbody.innerHTML = '<tr><td style="padding:24px;color:#999;text-align:center">데이터가 없습니다.</td></tr>';
+      document.getElementById('data-table').style.display = 'table';
+      document.getElementById('add-row-btn').style.display = 'block';
+      return;
+    }
+
+    const maxCols = Math.max(...values.map(r => r.length));
+    const header = values[0];
+
+    // Header row
+    const tr = document.createElement('tr');
+    const thNum = document.createElement('th');
+    thNum.className = 'row-num';
+    thNum.textContent = '#';
+    tr.appendChild(thNum);
+    for (let c = 0; c < maxCols; c++) {
+      const th = document.createElement('th');
+      th.textContent = header[c] || colLetter(c);
+      tr.appendChild(th);
+    }
+    thead.appendChild(tr);
+
+    // Data rows
+    for (let r = 1; r < values.length; r++) {
+      const tr = document.createElement('tr');
+      const tdNum = document.createElement('td');
+      tdNum.className = 'row-num';
+      tdNum.textContent = r;
+      tr.appendChild(tdNum);
+      for (let c = 0; c < maxCols; c++) {
+        const td = document.createElement('td');
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.value = (values[r] || [])[c] || '';
+        input.dataset.row = r;
+        input.dataset.col = c;
+        input.addEventListener('input', onCellChange);
+        td.appendChild(input);
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+
+    document.getElementById('data-table').style.display = 'table';
+    document.getElementById('add-row-btn').style.display = 'block';
+  }
+
+  function colLetter(n) {
+    let s = '';
+    n++;
+    while (n > 0) { n--; s = String.fromCharCode(65 + (n % 26)) + s; n = Math.floor(n / 26); }
+    return s;
+  }
+
+  function onCellChange(e) {
+    const input = e.target;
+    const r = parseInt(input.dataset.row);
+    const c = parseInt(input.dataset.col);
+    const key = `${r},${c}`;
+    const orig = ((originalData[r] || [])[c] || '');
+    if (input.value !== orig) {
+      modifiedCells.add(key);
+      input.parentElement.classList.add('modified');
+    } else {
+      modifiedCells.delete(key);
+      input.parentElement.classList.remove('modified');
+    }
+    setStatus(`${modifiedCells.size}개 셀 수정됨`, modifiedCells.size ? 'saving' : '');
+  }
+
+  function addRow() {
+    const tbody = document.getElementById('table-body');
+    const headerRow = document.querySelector('#table-head tr');
+    if (!headerRow) return;
+    const colCount = headerRow.children.length - 1;
+    const newRowIdx = tbody.children.length + 1;
+
+    const tr = document.createElement('tr');
+    const tdNum = document.createElement('td');
+    tdNum.className = 'row-num';
+    tdNum.textContent = newRowIdx;
+    tr.appendChild(tdNum);
+    for (let c = 0; c < colCount; c++) {
+      const td = document.createElement('td');
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.value = '';
+      input.dataset.row = newRowIdx;
+      input.dataset.col = c;
+      input.addEventListener('input', onCellChange);
+      td.appendChild(input);
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+    modifiedCells.add(`${newRowIdx},0`);
+    setStatus('새 행 추가됨 - 저장하세요', 'saving');
+  }
+
+  async function saveAll() {
+    setStatus('저장 중...', 'saving');
+    try {
+      const inputs = document.querySelectorAll('#table-body input');
+      const rowMap = {};
+      inputs.forEach(inp => {
+        const r = parseInt(inp.dataset.row);
+        const c = parseInt(inp.dataset.col);
+        if (!rowMap[r]) rowMap[r] = [];
+        rowMap[r][c] = inp.value;
+      });
+
+      const data = [];
+      Object.entries(rowMap).forEach(([r, cols]) => {
+        data.push({
+          range: `${currentSheetName}!A${parseInt(r) + 1}`,
+          values: [cols]
+        });
+      });
+
+      if (!data.length) { setStatus('변경사항 없음', 'saved'); return; }
+
+      await apiFetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values:batchUpdate`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            valueInputOption: 'USER_ENTERED',
+            data
+          })
+        }
+      );
+
+      document.querySelectorAll('#table-body td.modified').forEach(td => td.classList.remove('modified'));
+      modifiedCells.clear();
+      originalData = Array.from(document.querySelectorAll('#table-body tr')).map(tr =>
+        Array.from(tr.querySelectorAll('input')).map(i => i.value)
+      );
+      setStatus('저장 완료 ✓', 'saved');
+    } catch (e) {
+      setStatus('저장 실패: ' + e.message, 'error');
+    }
+  }
+
+  async function reloadData() {
+    if (modifiedCells.size > 0 && !confirm('저장되지 않은 변경사항이 있습니다. 새로고침하시겠어요?')) return;
+    await loadSheet();
+  }
+
+  function logout() {
+    accessToken = null;
+    spreadsheetId = null;
+    modifiedCells.clear();
+    document.getElementById('main-panel').style.display = 'none';
+    document.getElementById('setup-panel').style.display = 'block';
+    if (typeof google !== 'undefined') google.accounts.oauth2.revoke(accessToken);
+  }
+
+  function showLoading(show) {
+    document.getElementById('loading').style.display = show ? 'block' : 'none';
+    document.getElementById('data-table').style.display = show ? 'none' : 'table';
+    document.getElementById('add-row-btn').style.display = show ? 'none' : 'block';
+  }
+
+  function setStatus(msg, type = '') {
+    const el = document.getElementById('status');
+    el.textContent = msg;
+    el.className = type;
+  }
+
+  // Restore saved values
+  window.addEventListener('load', () => {
+    const savedId = localStorage.getItem('gse_client_id');
+    const savedUrl = localStorage.getItem('gse_sheet_url');
+    if (savedId) document.getElementById('client-id-input').value = savedId;
+    if (savedUrl) document.getElementById('sheet-url-input').value = savedUrl;
+  });
+
+  // Ctrl+S shortcut
+  document.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+      e.preventDefault();
+      if (accessToken) saveAll();
+    }
+  });
+</script>
+</body>
+</html>
