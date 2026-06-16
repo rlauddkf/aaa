@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Sheets Editor</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', sans-serif;
+      background: #f0f2f5;
+      color: #333;
+      min-height: 100vh;
+    }
+
+    header {
+      background: #1a73e8;
+      color: white;
+      padding: 14px 24px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+    }
+    header h1 { font-size: 1.2rem; font-weight: 600; }
+
+    #url-bar {
+      background: white;
+      padding: 12px 24px;
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      border-bottom: 1px solid #e0e0e0;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    }
+    #url-bar input {
+      flex: 1;
+      padding: 9px 14px;
+      border: 1px solid #ccc;
+      border-radius: 8px;
+      font-size: 0.95rem;
+    }
+    #url-bar input:focus {
+      outline: none;
+      border-color: #1a73e8;
+      box-shadow: 0 0 0 3px rgba(26,115,232,0.15);
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 9px 18px;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 0.9rem;
+      font-weight: 600;
+      white-space: nowrap;
+      transition: background 0.2s, transform 0.1s;
+    }
+    .btn:active { transform: scale(0.97); }
+    .btn-primary { background: #1a73e8; color: white; }
+    .btn-primary:hover { background: #1558b0; }
+    .btn-success { background: #34a853; color: white; }
+    .btn-success:hover { background: #2a8042; }
+    .btn-secondary { background: #f1f3f4; color: #333; }
+    .btn-secondary:hover { background: #e2e5e9; }
+
+    #main { padding: 20px; display: none; }
+
+    #toolbar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+      background: white;
+      padding: 10px 16px;
+      border-radius: 10px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+    }
+
+    #sheet-title {
+      font-weight: 700;
+      font-size: 1.05rem;
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    #sheet-select {
+      padding: 7px 10px;
+      border: 1px solid #ccc;
+      border-radius: 7px;
+      font-size: 0.88rem;
+      cursor: pointer;
+    }
+
+    #status {
+      font-size: 0.82rem;
+      padding: 4px 10px;
+      border-radius: 6px;
+      background: #f1f3f4;
+      color: #555;
+    }
+    #status.saving { color: #f29900; background: #fef7e0; }
+    #status.saved  { color: #34a853; background: #e6f4ea; }
+    #status.error  { color: #ea4335; background: #fce8e6; }
+
+    #table-wrap {
+      background: white;
+      border-radius: 10px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+      overflow: auto;
+      max-height: calc(100vh - 210px);
+    }
+
+    table {
+      border-collapse: collapse;
+      min-width: 100%;
+      font-size: 0.88rem;
+    }
+
+    thead th {
+      background: #f8f9fa;
+      border: 1px solid #e0e0e0;
+      padding: 8px 12px;
+      text-align: left;
+      font-weight: 600;
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      white-space: nowrap;
+      color: #555;
+    }
+    thead th.rn { background: #efefef; color: #aaa; font-weight: 400; width: 44px; min-width: 44px; text-align: center; }
+
+    tbody td {
+      border: 1px solid #e8e8e8;
+      padding: 0;
+      min-width: 120px;
+      max-width: 320px;
+    }
+    tbody td.rn {
+      background: #fafafa;
+      color: #bbb;
+      text-align: center;
+      font-size: 0.78rem;
+      padding: 6px;
+      min-width: 44px;
+      max-width: 44px;
+      user-select: none;
+    }
+    tbody td input {
+      width: 100%;
+      border: none;
+      padding: 7px 10px;
+      font-size: 0.88rem;
+      font-family: inherit;
+      background: transparent;
+      outline: none;
+    }
+    tbody td input:focus { background: #e8f0fe; box-shadow: inset 0 0 0 2px #1a73e8; }
+    tbody td.dirty input { background: #fffde7; }
+
+    #add-row-btn {
+      display: block;
+      width: 100%;
+      padding: 8px;
+      background: #f8f9fa;
+      border: none;
+      border-top: 1px solid #e0e0e0;
+      color: #1a73e8;
+      cursor: pointer;
+      font-size: 0.85rem;
+      text-align: center;
+    }
+    #add-row-btn:hover { background: #e8f0fe; }
+
+    #empty-state {
+      text-align: center;
+      padding: 80px 24px;
+      color: #aaa;
+    }
+    #empty-state svg { margin-bottom: 16px; opacity: 0.4; }
+    #empty-state p { font-size: 1rem; }
+
+    .spinner {
+      display: inline-block;
+      width: 18px; height: 18px;
+      border: 2px solid #ccc;
+      border-top-color: #1a73e8;
+      border-radius: 50%;
+      animation: spin .7s linear infinite;
+      vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+
+<header>
+  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.8">
+    <rect x="3" y="3" width="18" height="18" rx="2"/>
+    <line x1="3" y1="9" x2="21" y2="9"/>
+    <line x1="3" y1="15" x2="21" y2="15"/>
+    <line x1="9" y1="3" x2="9" y2="21"/>
+    <line x1="15" y1="3" x2="15" y2="21"/>
+  </svg>
+  <h1>Sheets Editor</h1>
+</header>
+
+<div id="url-bar">
+  <input id="url-input" type="text"
+    placeholder="Google Sheets URL 붙여넣기 (예: https://docs.google.com/spreadsheets/d/...)"
+    onkeydown="if(event.key==='Enter') loadMeta()"
+  />
+  <button class="btn btn-primary" onclick="loadMeta()">열기</button>
+</div>
+
+<div id="empty-state">
+  <svg width="64" height="64" viewBox="0 0 24 24" fill="#aaa"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/></svg>
+  <p>위에 Google Sheets 링크를 붙여넣고 열기를 누르세요</p>
+</div>
+
+<div id="main">
+  <div id="toolbar">
+    <div id="sheet-title"></div>
+    <select id="sheet-select" onchange="loadValues()"></select>
+    <span id="status"></span>
+    <button class="btn btn-success" onclick="saveAll()">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M17 3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V7l-4-4zm-5 16c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3zm3-10H5V5h10v4z"/></svg>
+      저장 (Ctrl+S)
+    </button>
+    <button class="btn btn-secondary" onclick="reloadValues()">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M17.65 6.35A7.958 7.958 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+      새로고침
+    </button>
+  </div>
+
+  <div id="table-wrap">
+    <table id="tbl" style="display:none">
+      <thead id="thead"></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+    <button id="add-row-btn" style="display:none" onclick="addRow()">+ 행 추가</button>
+  </div>
+</div>
+
+<script>
+let currentUrl = '';
+let currentSheet = '';
+let originalData = [];
+let dirtyKeys = new Set();
+
+async function api(path, options = {}) {
+  const res = await fetch(path, {
+    headers: { 'Content-Type': 'application/json' },
+    ...options,
+  });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.error || res.statusText);
+  return json;
+}
+
+async function loadMeta() {
+  const url = document.getElementById('url-input').value.trim();
+  if (!url) return;
+  currentUrl = url;
+  setStatus('<span class="spinner"></span> 불러오는 중...', '');
+  try {
+    const data = await api(`/api/meta?url=${encodeURIComponent(url)}`);
+    document.getElementById('sheet-title').textContent = data.properties.title;
+    const sel = document.getElementById('sheet-select');
+    sel.innerHTML = '';
+    data.sheets.forEach(s => {
+      const opt = document.createElement('option');
+      opt.value = s.properties.title;
+      opt.textContent = s.properties.title;
+      sel.appendChild(opt);
+    });
+    document.getElementById('empty-state').style.display = 'none';
+    document.getElementById('main').style.display = 'block';
+    await loadValues();
+  } catch (e) {
+    setStatus('오류: ' + e.message, 'error');
+    alert('스프레드시트를 불러오지 못했습니다.\n\n서비스 계정 이메일에 시트 공유가 되어있는지 확인하세요.\n\n오류: ' + e.message);
+  }
+}
+
+async function loadValues() {
+  currentSheet = document.getElementById('sheet-select').value;
+  dirtyKeys.clear();
+  setStatus('<span class="spinner"></span> 로딩...', '');
+  try {
+    const data = await api(`/api/values?url=${encodeURIComponent(currentUrl)}&sheet=${encodeURIComponent(currentSheet)}`);
+    originalData = (data.values || []).map(r => [...r]);
+    renderTable(data.values || []);
+    setStatus('불러오기 완료', 'saved');
+  } catch (e) {
+    setStatus('로딩 실패: ' + e.message, 'error');
+  }
+}
+
+async function reloadValues() {
+  if (dirtyKeys.size > 0 && !confirm('저장되지 않은 변경사항이 있습니다. 새로고침할까요?')) return;
+  await loadValues();
+}
+
+function renderTable(values) {
+  const thead = document.getElementById('thead');
+  const tbody = document.getElementById('tbody');
+  thead.innerHTML = '';
+  tbody.innerHTML = '';
+
+  if (!values.length) {
+    document.getElementById('tbl').style.display = 'table';
+    document.getElementById('add-row-btn').style.display = 'block';
+    return;
+  }
+
+  const maxCols = Math.max(...values.map(r => r.length));
+
+  // header
+  const htr = document.createElement('tr');
+  addTh(htr, '#', true);
+  for (let c = 0; c < maxCols; c++) addTh(htr, values[0][c] || colLetter(c));
+  thead.appendChild(htr);
+
+  // rows
+  for (let r = 1; r < values.length; r++) {
+    const tr = document.createElement('tr');
+    const numTd = document.createElement('td');
+    numTd.className = 'rn';
+    numTd.textContent = r;
+    tr.appendChild(numTd);
+    for (let c = 0; c < maxCols; c++) {
+      tr.appendChild(makeCell(r, c, (values[r] || [])[c] || ''));
+    }
+    tbody.appendChild(tr);
+  }
+
+  document.getElementById('tbl').style.display = 'table';
+  document.getElementById('add-row-btn').style.display = 'block';
+}
+
+function addTh(tr, text, isNum = false) {
+  const th = document.createElement('th');
+  th.textContent = text;
+  if (isNum) th.className = 'rn';
+  tr.appendChild(th);
+}
+
+function makeCell(r, c, val) {
+  const td = document.createElement('td');
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.value = val;
+  input.dataset.r = r;
+  input.dataset.c = c;
+  input.addEventListener('input', onInput);
+  td.appendChild(input);
+  return td;
+}
+
+function onInput(e) {
+  const inp = e.target;
+  const r = +inp.dataset.r, c = +inp.dataset.c;
+  const key = `${r},${c}`;
+  const orig = (originalData[r] || [])[c] || '';
+  if (inp.value !== orig) {
+    dirtyKeys.add(key);
+    inp.parentElement.classList.add('dirty');
+  } else {
+    dirtyKeys.delete(key);
+    inp.parentElement.classList.remove('dirty');
+  }
+  setStatus(dirtyKeys.size ? `${dirtyKeys.size}개 셀 수정됨` : '준비', dirtyKeys.size ? 'saving' : '');
+}
+
+function addRow() {
+  const maxCols = document.querySelectorAll('#thead th').length - 1;
+  const newR = document.querySelectorAll('#tbody tr').length + 1;
+  const tr = document.createElement('tr');
+  const numTd = document.createElement('td');
+  numTd.className = 'rn';
+  numTd.textContent = newR;
+  tr.appendChild(numTd);
+  for (let c = 0; c < maxCols; c++) tr.appendChild(makeCell(newR, c, ''));
+  document.getElementById('tbody').appendChild(tr);
+  dirtyKeys.add(`${newR},0`);
+  setStatus('새 행 추가됨 — 저장하세요', 'saving');
+}
+
+async function saveAll() {
+  setStatus('<span class="spinner"></span> 저장 중...', 'saving');
+  try {
+    const inputs = document.querySelectorAll('#tbody input');
+    const rowMap = {};
+    inputs.forEach(inp => {
+      const r = +inp.dataset.r, c = +inp.dataset.c;
+      if (!rowMap[r]) rowMap[r] = [];
+      rowMap[r][c] = inp.value;
+    });
+
+    const data = Object.entries(rowMap).map(([r, cols]) => ({
+      range: `${currentSheet}!A${+r + 1}`,
+      values: [cols],
+    }));
+
+    if (!data.length) { setStatus('변경사항 없음', 'saved'); return; }
+
+    const result = await api('/api/values', {
+      method: 'POST',
+      body: JSON.stringify({ url: currentUrl, data }),
+    });
+
+    document.querySelectorAll('#tbody td.dirty').forEach(td => td.classList.remove('dirty'));
+    dirtyKeys.clear();
+    originalData = Array.from(document.querySelectorAll('#tbody tr')).map(tr =>
+      Array.from(tr.querySelectorAll('input')).map(i => i.value)
+    );
+    setStatus(`저장 완료 ✓ (${result.updatedCells}개 셀)`, 'saved');
+  } catch (e) {
+    setStatus('저장 실패: ' + e.message, 'error');
+  }
+}
+
+function setStatus(html, cls) {
+  const el = document.getElementById('status');
+  el.innerHTML = html;
+  el.className = cls;
+}
+
+function colLetter(n) {
+  let s = ''; n++;
+  while (n > 0) { n--; s = String.fromCharCode(65 + (n % 26)) + s; n = Math.floor(n / 26); }
+  return s;
+}
+
+// Ctrl+S
+document.addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+    e.preventDefault();
+    if (currentUrl) saveAll();
+  }
+});
+
+// Restore last URL
+window.addEventListener('load', () => {
+  const saved = localStorage.getItem('last_sheet_url');
+  if (saved) document.getElementById('url-input').value = saved;
+});
+document.getElementById('url-input').addEventListener('change', e => {
+  localStorage.setItem('last_sheet_url', e.target.value);
+});
+</script>
+</body>
+</html>

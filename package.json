@@ -1,0 +1,14 @@
+{
+  "name": "sheets-editor",
+  "version": "1.0.0",
+  "description": "Google Sheets GUI Editor - 링크 공유만으로 누구나 수정 가능",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "npx nodemon server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "googleapis": "^140.0.0"
+  }
+}
