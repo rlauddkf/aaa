@@ -218,8 +218,10 @@ class PowerPointController:
 #  GUI
 # ===========================================================================
 class App(tk.Tk):
-    DISP_W = 760          # 슬라이드 표시 가로 픽셀
     BADGE_COLORS = "#e53935"
+    ZOOM_STEP = 1.25
+    ZOOM_MIN = 0.1
+    ZOOM_MAX = 4.0
 
     def __init__(self):
         super().__init__()
@@ -232,7 +234,8 @@ class App(tk.Tk):
 
         self.slide_index = 1
         self.slide_photo = None
-        self.scale = 1.0                # points -> display px
+        self.scale = 1.0                # points -> display px (= zoom)
+        self.zoom = None                # None 이면 '화면 맞춤' 자동 계산
         self.overlays = []              # [(x0,y0,x1,y1,target)] 현재 슬라이드
         self.sequence = []             # 선택된 target dict 리스트 (교체 순서)
         self._row_thumbs = []           # PhotoImage 참조 유지
@@ -254,6 +257,15 @@ class App(tk.Tk):
         self.slide_lbl.pack(side="left", padx=4)
         ttk.Button(nav, text="다음 ▶", command=lambda: self.change_slide(+1)).pack(side="left")
 
+        # 줌 컨트롤
+        zoom = ttk.Frame(top)
+        zoom.pack(side="left", padx=8)
+        ttk.Button(zoom, text="－", width=3, command=self.zoom_out).pack(side="left")
+        self.zoom_lbl = ttk.Label(zoom, text="100%", width=6, anchor="center")
+        self.zoom_lbl.pack(side="left")
+        ttk.Button(zoom, text="＋", width=3, command=self.zoom_in).pack(side="left")
+        ttk.Button(zoom, text="화면 맞춤", command=self.zoom_fit).pack(side="left", padx=(4, 0))
+
         self.status = tk.StringVar(value="PowerPoint 를 연결해주세요.")
         ttk.Label(top, textvariable=self.status, foreground="#0060c0").pack(side="left", padx=12)
 
@@ -261,13 +273,41 @@ class App(tk.Tk):
         body = ttk.Frame(self, padding=(8, 0, 8, 8))
         body.pack(fill="both", expand=True)
 
-        # 좌: 슬라이드 캔버스
-        left = ttk.LabelFrame(body, text="슬라이드 — 바꿀 사진을 순서대로 클릭 (다시 클릭 = 취소)", padding=6)
+        # 좌: 슬라이드 캔버스 (스크롤 + 줌 + 드래그 이동)
+        left = ttk.LabelFrame(
+            body,
+            text="슬라이드 — 사진을 순서대로 클릭 (다시 클릭=취소) · 우클릭 드래그=이동 · Ctrl+휠=확대/축소",
+            padding=6)
         left.pack(side="left", fill="both", expand=True)
-        self.canvas = tk.Canvas(left, bg="#3c3c3c", highlightthickness=0,
-                                width=self.DISP_W, height=int(self.DISP_W * 0.6))
-        self.canvas.pack(fill="both", expand=True)
+
+        cv_wrap = ttk.Frame(left)
+        cv_wrap.pack(fill="both", expand=True)
+        cv_wrap.rowconfigure(0, weight=1)
+        cv_wrap.columnconfigure(0, weight=1)
+
+        self.canvas = tk.Canvas(cv_wrap, bg="#3c3c3c", highlightthickness=0)
+        hbar = ttk.Scrollbar(cv_wrap, orient="horizontal", command=self.canvas.xview)
+        vbar = ttk.Scrollbar(cv_wrap, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(xscrollcommand=hbar.set, yscrollcommand=vbar.set)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        vbar.grid(row=0, column=1, sticky="ns")
+        hbar.grid(row=1, column=0, sticky="ew")
+
+        # 좌클릭 = 사진 선택
         self.canvas.bind("<Button-1>", self.on_canvas_click)
+        # 우클릭 드래그 = 화면 이동(panning)
+        self.canvas.bind("<ButtonPress-3>", lambda e: self.canvas.scan_mark(e.x, e.y))
+        self.canvas.bind("<B3-Motion>", lambda e: self.canvas.scan_dragto(e.x, e.y, gain=1))
+        # 가운데 버튼 드래그도 이동
+        self.canvas.bind("<ButtonPress-2>", lambda e: self.canvas.scan_mark(e.x, e.y))
+        self.canvas.bind("<B2-Motion>", lambda e: self.canvas.scan_dragto(e.x, e.y, gain=1))
+        # 휠 스크롤 / Ctrl+휠 줌
+        self.canvas.bind("<MouseWheel>", self._on_wheel)
+        self.canvas.bind("<Shift-MouseWheel>", self._on_shift_wheel)
+        self.canvas.bind("<Control-MouseWheel>", self._on_ctrl_wheel)
+        # Linux 휠 (참고용)
+        self.canvas.bind("<Button-4>", lambda e: self.canvas.yview_scroll(-1, "units"))
+        self.canvas.bind("<Button-5>", lambda e: self.canvas.yview_scroll(1, "units"))
 
         # 우: 순서 + 새 파일
         right = ttk.LabelFrame(body, text="교체 순서 / 새 사진", padding=6)
@@ -330,6 +370,40 @@ class App(tk.Tk):
         self.slide_index = max(1, min(n, self.slide_index + delta))
         self.render_slide()
 
+    def _fit_zoom(self, w_pt, h_pt):
+        self.canvas.update_idletasks()
+        vw = self.canvas.winfo_width()
+        vh = self.canvas.winfo_height()
+        if vw <= 1 or vh <= 1:      # 아직 그려지기 전
+            vw, vh = 820, 520
+        return max(self.ZOOM_MIN, min(vw / w_pt, vh / h_pt) * 0.98)
+
+    def zoom_in(self):
+        if self.zoom:
+            self.zoom = min(self.ZOOM_MAX, self.zoom * self.ZOOM_STEP)
+            self.render_slide()
+
+    def zoom_out(self):
+        if self.zoom:
+            self.zoom = max(self.ZOOM_MIN, self.zoom / self.ZOOM_STEP)
+            self.render_slide()
+
+    def zoom_fit(self):
+        self.zoom = None            # render 에서 맞춤 재계산
+        self.render_slide()
+
+    def _on_wheel(self, event):
+        self.canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+
+    def _on_shift_wheel(self, event):
+        self.canvas.xview_scroll(-1 if event.delta > 0 else 1, "units")
+
+    def _on_ctrl_wheel(self, event):
+        if event.delta > 0:
+            self.zoom_in()
+        else:
+            self.zoom_out()
+
     def render_slide(self):
         if self.ctrl.pres is None or not HAS_PIL:
             return
@@ -338,21 +412,27 @@ class App(tk.Tk):
         self.slide_lbl.configure(text=f"슬라이드 {self.slide_index}/{n}")
 
         w_pt, h_pt = self.ctrl.slide_size_pt()
-        disp_w = self.DISP_W
-        disp_h = int(disp_w * h_pt / w_pt)
-        self.scale = disp_w / w_pt
+        if self.zoom is None:
+            self.zoom = self._fit_zoom(w_pt, h_pt)
+        self.scale = self.zoom
+        disp_w = max(1, int(w_pt * self.zoom))
+        disp_h = max(1, int(h_pt * self.zoom))
+        self.zoom_lbl.configure(text=f"{int(self.zoom * 100)}%")
 
         png = os.path.join(self._tmp, f"slide_{self.slide_index}.png")
         try:
-            # 선명하게 2배로 내보낸 뒤 표시 크기로 축소
-            self.ctrl.export_slide_png(self.slide_index, png, disp_w * 2, disp_h * 2)
+            # 선명하게 1.5배로 내보낸 뒤 표시 크기로 축소 (과도한 해상도 방지)
+            ex_w = min(disp_w * 3, max(disp_w, 2400))
+            ex_h = int(ex_w * h_pt / w_pt)
+            self.ctrl.export_slide_png(self.slide_index, png, ex_w, ex_h)
             img = Image.open(png).resize((disp_w, disp_h), Image.LANCZOS)
             self.slide_photo = ImageTk.PhotoImage(img)
         except Exception as e:
             self.status.set(f"슬라이드 표시 실패: {e}")
             return
 
-        self.canvas.configure(width=disp_w, height=disp_h)
+        # 스크롤 영역을 슬라이드 크기로 설정
+        self.canvas.configure(scrollregion=(0, 0, disp_w, disp_h))
         self.overlays = [
             (
                 p["left"] * self.scale, p["top"] * self.scale,
@@ -386,10 +466,13 @@ class App(tk.Tk):
     def on_canvas_click(self, event):
         if not self.overlays:
             return
+        # 스크롤/줌 상태를 반영한 실제 캔버스 좌표로 변환
+        cx = self.canvas.canvasx(event.x)
+        cy = self.canvas.canvasy(event.y)
         hit = None
         best_area = None
         for (x0, y0, x1, y1, target) in self.overlays:
-            if x0 <= event.x <= x1 and y0 <= event.y <= y1:
+            if x0 <= cx <= x1 and y0 <= cy <= y1:
                 area = (x1 - x0) * (y1 - y0)
                 if best_area is None or area < best_area:
                     best_area = area
