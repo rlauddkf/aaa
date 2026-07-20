@@ -1,15 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-PowerPoint 이미지 일괄 교체 프로그램
-======================================
+PowerPoint 이미지 일괄 교체 프로그램  (슬라이드 직접 클릭 방식)
+================================================================
 
-현재 "열려 있는" PowerPoint 를 그대로 제어해서,
- 1) 교체할 대상 사진들을 찾아 순서를 정하고
- 2) 새로 넣을 이미지 파일들을 순서대로 고른 뒤
- 3) [교체 실행] 을 누르면 각 사진을 "같은 위치 · 같은 크기" 로 바꿔줍니다.
+현재 "열려 있는" PowerPoint 를 그대로 제어합니다.
 
-동작 환경: Windows + PowerPoint (데스크톱 버전) 설치 필요
-필요 패키지: pywin32 (필수), Pillow (미리보기용, 없어도 동작)
+ 1) 프로그램에 현재 슬라이드가 그림으로 그려집니다.
+ 2) 바꾸고 싶은 사진을 슬라이드에서 "직접 클릭" 하면 1, 2, 3 … 순번이 붙습니다.
+    (같은 사진을 다시 누르면 취소, 슬라이드를 넘겨가며 여러 장 선택 가능)
+ 3) 오른쪽에 순서대로 "새 파일 선택" 칸이 생깁니다. 새 이미지를 고르고
+ 4) [교체 실행] 을 누르면 각 사진이 "같은 위치 · 같은 크기" 로 바뀝니다.
+
+동작 환경: Windows + PowerPoint(데스크톱) 설치 필요
+필요 패키지: pywin32 (필수), Pillow (필수 - 화면 표시용)
 
     pip install pywin32 Pillow
 
@@ -25,9 +28,6 @@ import traceback
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-# ---------------------------------------------------------------------------
-# 선택 의존성 (Pillow) : 썸네일 미리보기에만 사용. 없으면 미리보기만 비활성화.
-# ---------------------------------------------------------------------------
 try:
     from PIL import Image, ImageTk
     HAS_PIL = True
@@ -44,11 +44,7 @@ MSO_PICTURE = 13          # msoPicture
 MSO_LINKED_PICTURE = 11   # msoLinkedPicture
 MSO_PLACEHOLDER = 14      # msoPlaceholder
 
-PP_SHAPE_FORMAT_PNG = 2   # ppShapeFormatPNG
-
-# ZOrder 명령
 MSO_SEND_BACKWARD = 3     # msoSendBackward
-
 
 IMAGE_TYPES = [
     ("이미지 파일", "*.png *.jpg *.jpeg *.gif *.bmp *.tif *.tiff *.emf *.wmf"),
@@ -57,13 +53,12 @@ IMAGE_TYPES = [
 
 
 def _import_win32():
-    """win32com 을 필요할 때 import (비 Windows 환경에서 파일 자체는 열리도록)."""
     import win32com.client  # noqa
     return win32com.client
 
 
 # ===========================================================================
-#  PowerPoint 제어 로직
+#  PowerPoint 제어
 # ===========================================================================
 class PowerPointController:
     def __init__(self):
@@ -71,15 +66,12 @@ class PowerPointController:
         self.pres = None
 
     def connect(self):
-        """실행 중인 PowerPoint 에 연결. 없으면 새로 띄운다."""
         win32com = _import_win32()
         try:
             self.app = win32com.GetActiveObject("PowerPoint.Application")
         except Exception:
-            # 실행 중인 인스턴스가 없으면 새로 시작
             self.app = win32com.Dispatch("PowerPoint.Application")
         self.app.Visible = True
-
         if self.app.Presentations.Count == 0:
             raise RuntimeError(
                 "열려 있는 프레젠테이션이 없습니다.\n"
@@ -88,56 +80,57 @@ class PowerPointController:
         self.pres = self.app.ActivePresentation
         return self.pres.Name
 
-    # -- 사진 수집 -------------------------------------------------------
+    def slide_count(self):
+        return int(self.pres.Slides.Count)
+
+    def current_slide_index(self):
+        try:
+            return int(self.app.ActiveWindow.View.Slide.SlideIndex)
+        except Exception:
+            return 1
+
+    def slide_size_pt(self):
+        ps = self.pres.PageSetup
+        return float(ps.SlideWidth), float(ps.SlideHeight)
+
     @staticmethod
     def _is_picture(shape):
         try:
             if shape.Type in (MSO_PICTURE, MSO_LINKED_PICTURE):
                 return True
-            # 그림으로 채워진 자리표시자(placeholder)도 사진으로 취급
             if shape.Type == MSO_PLACEHOLDER:
                 try:
-                    if shape.PictureFormat is not None and shape.Fill.Type == 6:
-                        return True
+                    return shape.Fill.Type == 6
                 except Exception:
                     return False
         except Exception:
             return False
         return False
 
-    def collect_pictures(self, scope="current"):
-        """
-        scope: 'current' = 현재 슬라이드만, 'all' = 모든 슬라이드
-        반환: [{slide_index, shape_id, name, left, top, width, height, rotation}]
-        """
+    def pictures_on_slide(self, slide_index):
+        """해당 슬라이드의 사진 목록 (위치/크기는 points 단위)."""
         result = []
-        if scope == "current":
+        slide = self.pres.Slides.Item(slide_index)
+        for shape in slide.Shapes:
+            if not self._is_picture(shape):
+                continue
             try:
-                slide_indexes = [self.app.ActiveWindow.View.Slide.SlideIndex]
+                result.append({
+                    "slide_index": slide_index,
+                    "shape_id": int(shape.Id),
+                    "name": str(shape.Name),
+                    "left": float(shape.Left),
+                    "top": float(shape.Top),
+                    "width": float(shape.Width),
+                    "height": float(shape.Height),
+                })
             except Exception:
-                slide_indexes = [1]
-        else:
-            slide_indexes = list(range(1, self.pres.Slides.Count + 1))
-
-        for si in slide_indexes:
-            slide = self.pres.Slides.Item(si)
-            for shape in slide.Shapes:
-                if not self._is_picture(shape):
-                    continue
-                try:
-                    result.append({
-                        "slide_index": si,
-                        "shape_id": int(shape.Id),
-                        "name": str(shape.Name),
-                        "left": float(shape.Left),
-                        "top": float(shape.Top),
-                        "width": float(shape.Width),
-                        "height": float(shape.Height),
-                        "rotation": float(shape.Rotation),
-                    })
-                except Exception:
-                    continue
+                continue
         return result
+
+    def export_slide_png(self, slide_index, out_path, px_w, px_h):
+        slide = self.pres.Slides.Item(slide_index)
+        slide.Export(out_path, "PNG", int(px_w), int(px_h))
 
     def find_shape(self, slide_index, shape_id):
         slide = self.pres.Slides.Item(slide_index)
@@ -149,103 +142,56 @@ class PowerPointController:
                 continue
         return slide, None
 
-    def export_shape_png(self, slide_index, shape_id, out_path):
-        """대상 사진을 PNG 로 내보내 미리보기에 사용."""
-        _, shape = self.find_shape(slide_index, shape_id)
-        if shape is None:
-            return False
-        shape.Export(out_path, PP_SHAPE_FORMAT_PNG)
-        return True
-
-    def select_shape(self, slide_index, shape_id):
-        """PowerPoint 화면에서 해당 사진을 실제로 선택(하이라이트)."""
-        try:
-            self.app.ActiveWindow.View.GotoSlide(slide_index)
-        except Exception:
-            pass
-        _, shape = self.find_shape(slide_index, shape_id)
-        if shape is not None:
-            try:
-                shape.Select()
-            except Exception:
-                pass
-
-    # -- 실제 교체 -------------------------------------------------------
     def replace_picture(self, target, image_path, keep_aspect=False):
-        """
-        target 위치/크기 그대로 image_path 로 교체.
-        keep_aspect=True 이면 원래 박스 안에 비율 유지하여 가운데 배치.
-        """
         slide, old = self.find_shape(target["slide_index"], target["shape_id"])
         if old is None:
-            raise RuntimeError("대상 사진을 찾을 수 없습니다 (이미 삭제/변경됨).")
+            raise RuntimeError("대상 사진을 찾을 수 없습니다 (이미 변경됨).")
 
-        left = float(old.Left)
-        top = float(old.Top)
-        width = float(old.Width)
-        height = float(old.Height)
+        left, top = float(old.Left), float(old.Top)
+        width, height = float(old.Width), float(old.Height)
         rotation = float(old.Rotation)
-
         try:
             old_z = int(old.ZOrderPosition)
         except Exception:
             old_z = None
 
-        # 새 그림 추가 (일단 원래 박스 크기로)
         new_shape = slide.Shapes.AddPicture(
-            FileName=image_path,
-            LinkToFile=MSO_FALSE,
-            SaveWithDocument=MSO_TRUE,
-            Left=left,
-            Top=top,
-            Width=width,
-            Height=height,
+            FileName=image_path, LinkToFile=MSO_FALSE, SaveWithDocument=MSO_TRUE,
+            Left=left, Top=top, Width=width, Height=height,
         )
-
-        # 비율 유지 옵션 : 원본 이미지 비율대로 박스 안에 맞춰 가운데 정렬
         if keep_aspect:
             self._fit_keep_aspect(new_shape, left, top, width, height)
-
-        # 회전값 복원
         try:
             new_shape.Rotation = rotation
         except Exception:
             pass
 
-        # 기존 사진 삭제
         try:
             new_id = int(new_shape.Id)
         except Exception:
             new_id = None
         old.Delete()
 
-        # z-순서 복원 (기존 사진이 있던 층으로 이동)
         if old_z is not None and new_id is not None:
             self._move_to_zorder(slide, new_id, old_z)
 
     @staticmethod
-    def _fit_keep_aspect(shape, box_left, box_top, box_w, box_h):
+    def _fit_keep_aspect(shape, bx, by, bw, bh):
         try:
             shape.LockAspectRatio = MSO_TRUE
-            nat_w = float(shape.Width)
-            nat_h = float(shape.Height)
-            if nat_w <= 0 or nat_h <= 0:
+            nw, nh = float(shape.Width), float(shape.Height)
+            if nw <= 0 or nh <= 0:
                 return
-            scale = min(box_w / nat_w, box_h / nat_h)
-            new_w = nat_w * scale
-            new_h = nat_h * scale
-            shape.Width = new_w
-            shape.Height = new_h
-            shape.Left = box_left + (box_w - new_w) / 2.0
-            shape.Top = box_top + (box_h - new_h) / 2.0
+            s = min(bw / nw, bh / nh)
+            shape.Width, shape.Height = nw * s, nh * s
+            shape.Left = bx + (bw - nw * s) / 2.0
+            shape.Top = by + (bh - nh * s) / 2.0
         except Exception:
             pass
 
     @staticmethod
     def _move_to_zorder(slide, shape_id, target_z):
-        """새 그림(현재 맨 위)을 target_z 층까지 내린다."""
-        # 새로 추가된 그림은 맨 위에 있으므로 SendBackward 로 내려간다.
-        for _ in range(200):  # 안전 상한
+        for _ in range(200):
             shape = None
             for s in slide.Shapes:
                 try:
@@ -272,271 +218,290 @@ class PowerPointController:
 #  GUI
 # ===========================================================================
 class App(tk.Tk):
-    THUMB = 180
+    DISP_W = 760          # 슬라이드 표시 가로 픽셀
+    BADGE_COLORS = "#e53935"
 
     def __init__(self):
         super().__init__()
-        self.title("PowerPoint 사진 일괄 교체")
-        self.geometry("920x620")
-        self.minsize(820, 560)
+        self.title("PowerPoint 사진 일괄 교체 — 슬라이드에서 직접 클릭")
+        self.geometry("1160x760")
+        self.minsize(1000, 640)
 
         self.ctrl = PowerPointController()
-        self.targets = []      # 대상 사진 목록 (dict)
-        self.new_images = []   # 새 이미지 파일 경로 목록
-        self._preview_photo = None
-        self._tmp_dir = tempfile.mkdtemp(prefix="pptimg_")
+        self._tmp = tempfile.mkdtemp(prefix="pptimg_")
+
+        self.slide_index = 1
+        self.slide_photo = None
+        self.scale = 1.0                # points -> display px
+        self.overlays = []              # [(x0,y0,x1,y1,target)] 현재 슬라이드
+        self.sequence = []             # 선택된 target dict 리스트 (교체 순서)
+        self._row_thumbs = []           # PhotoImage 참조 유지
 
         self._build_ui()
 
-    # -- UI 구성 ---------------------------------------------------------
+    # ---------------- UI ----------------
     def _build_ui(self):
+        # 상단 툴바
         top = ttk.Frame(self, padding=8)
         top.pack(fill="x")
-
         ttk.Button(top, text="① PowerPoint 연결", command=self.on_connect).pack(side="left")
+        ttk.Button(top, text="새로고침", command=self.render_slide).pack(side="left", padx=(8, 0))
 
-        self.scope_var = tk.StringVar(value="current")
-        ttk.Radiobutton(top, text="현재 슬라이드", variable=self.scope_var,
-                        value="current").pack(side="left", padx=(12, 0))
-        ttk.Radiobutton(top, text="전체 슬라이드", variable=self.scope_var,
-                        value="all").pack(side="left")
+        nav = ttk.Frame(top)
+        nav.pack(side="left", padx=16)
+        ttk.Button(nav, text="◀ 이전", command=lambda: self.change_slide(-1)).pack(side="left")
+        self.slide_lbl = ttk.Label(nav, text="슬라이드 -/-", width=14, anchor="center")
+        self.slide_lbl.pack(side="left", padx=4)
+        ttk.Button(nav, text="다음 ▶", command=lambda: self.change_slide(+1)).pack(side="left")
 
-        ttk.Button(top, text="② 사진 불러오기", command=self.on_scan).pack(side="left", padx=(12, 0))
+        self.status = tk.StringVar(value="PowerPoint 를 연결해주세요.")
+        ttk.Label(top, textvariable=self.status, foreground="#0060c0").pack(side="left", padx=12)
 
-        self.status_var = tk.StringVar(value="PowerPoint 를 연결해주세요.")
-        ttk.Label(top, textvariable=self.status_var, foreground="#0060c0").pack(side="left", padx=12)
-
-        # 본문 : 좌(대상) - 중(미리보기) - 우(새 이미지)
-        body = ttk.Frame(self, padding=8)
+        # 본문
+        body = ttk.Frame(self, padding=(8, 0, 8, 8))
         body.pack(fill="both", expand=True)
 
-        # 좌 : 대상 사진
-        left = ttk.LabelFrame(body, text="대상 사진 (교체될 순서)  — 클릭하면 PPT 에서 선택됨", padding=6)
+        # 좌: 슬라이드 캔버스
+        left = ttk.LabelFrame(body, text="슬라이드 — 바꿀 사진을 순서대로 클릭 (다시 클릭 = 취소)", padding=6)
         left.pack(side="left", fill="both", expand=True)
+        self.canvas = tk.Canvas(left, bg="#3c3c3c", highlightthickness=0,
+                                width=self.DISP_W, height=int(self.DISP_W * 0.6))
+        self.canvas.pack(fill="both", expand=True)
+        self.canvas.bind("<Button-1>", self.on_canvas_click)
 
-        self.target_list = tk.Listbox(left, activestyle="dotbox")
-        self.target_list.pack(fill="both", expand=True)
-        self.target_list.bind("<<ListboxSelect>>", self.on_target_select)
+        # 우: 순서 + 새 파일
+        right = ttk.LabelFrame(body, text="교체 순서 / 새 사진", padding=6)
+        right.pack(side="left", fill="both", expand=False, padx=(8, 0))
+        right.configure(width=360)
 
-        tbtn = ttk.Frame(left)
-        tbtn.pack(fill="x", pady=(6, 0))
-        ttk.Button(tbtn, text="▲ 위로", command=lambda: self._move(self.target_list, self.targets, -1)).pack(side="left")
-        ttk.Button(tbtn, text="▼ 아래로", command=lambda: self._move(self.target_list, self.targets, +1)).pack(side="left", padx=4)
-        ttk.Button(tbtn, text="제거", command=self.on_remove_target).pack(side="left")
+        info = ttk.Label(right, foreground="#555", justify="left",
+                         text="왼쪽 슬라이드에서 사진을 클릭한 순서대로\n아래 목록이 채워집니다.")
+        info.pack(anchor="w", pady=(0, 6))
 
-        # 중 : 미리보기
-        mid = ttk.LabelFrame(body, text="미리보기", padding=6)
-        mid.pack(side="left", fill="y", padx=8)
-        self.preview_label = ttk.Label(mid, text="(미리보기)", anchor="center",
-                                       width=26)
-        self.preview_label.pack(fill="both", expand=True)
-        if not HAS_PIL:
-            ttk.Label(mid, text="Pillow 미설치\n(미리보기 비활성)",
-                      foreground="#a00", justify="center").pack()
+        # 스크롤 가능한 행 영역
+        wrap = ttk.Frame(right)
+        wrap.pack(fill="both", expand=True)
+        self.rows_canvas = tk.Canvas(wrap, highlightthickness=0, width=340)
+        vs = ttk.Scrollbar(wrap, orient="vertical", command=self.rows_canvas.yview)
+        self.rows_frame = ttk.Frame(self.rows_canvas)
+        self.rows_frame.bind(
+            "<Configure>",
+            lambda e: self.rows_canvas.configure(scrollregion=self.rows_canvas.bbox("all")))
+        self.rows_canvas.create_window((0, 0), window=self.rows_frame, anchor="nw")
+        self.rows_canvas.configure(yscrollcommand=vs.set)
+        self.rows_canvas.pack(side="left", fill="both", expand=True)
+        vs.pack(side="right", fill="y")
 
-        # 우 : 새 이미지
-        right = ttk.LabelFrame(body, text="새 사진 (같은 순서로 매칭)", padding=6)
-        right.pack(side="left", fill="both", expand=True)
+        rbtn = ttk.Frame(right)
+        rbtn.pack(fill="x", pady=(6, 0))
+        ttk.Button(rbtn, text="전체 초기화", command=self.clear_sequence).pack(side="left")
 
-        self.new_list = tk.Listbox(right, activestyle="dotbox")
-        self.new_list.pack(fill="both", expand=True)
-        self.new_list.bind("<<ListboxSelect>>", self.on_new_select)
-
-        nbtn = ttk.Frame(right)
-        nbtn.pack(fill="x", pady=(6, 0))
-        ttk.Button(nbtn, text="파일 추가", command=self.on_add_images).pack(side="left")
-        ttk.Button(nbtn, text="▲ 위로", command=lambda: self._move(self.new_list, self.new_images, -1)).pack(side="left", padx=4)
-        ttk.Button(nbtn, text="▼ 아래로", command=lambda: self._move(self.new_list, self.new_images, +1)).pack(side="left")
-        ttk.Button(nbtn, text="제거", command=self.on_remove_new).pack(side="left", padx=4)
-
-        # 하단 : 옵션 + 실행
+        # 하단
         bottom = ttk.Frame(self, padding=8)
         bottom.pack(fill="x")
-
-        self.keep_aspect_var = tk.BooleanVar(value=False)
+        self.keep_aspect = tk.BooleanVar(value=False)
         ttk.Checkbutton(bottom, text="원본 비율 유지 (박스 안에 맞춤)",
-                        variable=self.keep_aspect_var).pack(side="left")
+                        variable=self.keep_aspect).pack(side="left")
+        ttk.Button(bottom, text="② 교체 실행", command=self.on_replace).pack(side="right")
+        self.count_lbl = tk.StringVar(value="선택 0장")
+        ttk.Label(bottom, textvariable=self.count_lbl).pack(side="right", padx=12)
 
-        ttk.Button(bottom, text="③ 교체 실행", command=self.on_replace).pack(side="right")
-        self.match_var = tk.StringVar(value="")
-        ttk.Label(bottom, textvariable=self.match_var).pack(side="right", padx=12)
+        if not HAS_PIL:
+            messagebox.showwarning(
+                "Pillow 필요",
+                "이 방식은 Pillow 가 필요합니다.\n\n    pip install Pillow\n\n"
+                "설치 후 다시 실행해주세요.")
 
-        self._refresh_match_hint()
-
-    # -- 이벤트 핸들러 ---------------------------------------------------
+    # ---------------- 동작 ----------------
     def on_connect(self):
         try:
             name = self.ctrl.connect()
-            self.status_var.set(f"연결됨: {name}")
+            self.slide_index = self.ctrl.current_slide_index()
+            self.status.set(f"연결됨: {name}")
+            self.render_slide()
         except Exception as e:
             messagebox.showerror("연결 실패", str(e))
-            self.status_var.set("연결 실패")
+            self.status.set("연결 실패")
 
-    def on_scan(self):
+    def change_slide(self, delta):
         if self.ctrl.pres is None:
-            messagebox.showwarning("안내", "먼저 [PowerPoint 연결] 을 눌러주세요.")
             return
+        n = self.ctrl.slide_count()
+        self.slide_index = max(1, min(n, self.slide_index + delta))
+        self.render_slide()
+
+    def render_slide(self):
+        if self.ctrl.pres is None or not HAS_PIL:
+            return
+        n = self.ctrl.slide_count()
+        self.slide_index = max(1, min(n, self.slide_index))
+        self.slide_lbl.configure(text=f"슬라이드 {self.slide_index}/{n}")
+
+        w_pt, h_pt = self.ctrl.slide_size_pt()
+        disp_w = self.DISP_W
+        disp_h = int(disp_w * h_pt / w_pt)
+        self.scale = disp_w / w_pt
+
+        png = os.path.join(self._tmp, f"slide_{self.slide_index}.png")
         try:
-            self.targets = self.ctrl.collect_pictures(self.scope_var.get())
+            # 선명하게 2배로 내보낸 뒤 표시 크기로 축소
+            self.ctrl.export_slide_png(self.slide_index, png, disp_w * 2, disp_h * 2)
+            img = Image.open(png).resize((disp_w, disp_h), Image.LANCZOS)
+            self.slide_photo = ImageTk.PhotoImage(img)
         except Exception as e:
-            messagebox.showerror("오류", f"사진을 불러오지 못했습니다.\n{e}")
+            self.status.set(f"슬라이드 표시 실패: {e}")
             return
 
-        self.target_list.delete(0, tk.END)
-        for i, t in enumerate(self.targets, 1):
-            self.target_list.insert(
-                tk.END,
-                f"{i}. [슬라이드 {t['slide_index']}] {t['name']}  "
-                f"({int(t['width'])}×{int(t['height'])})"
+        self.canvas.configure(width=disp_w, height=disp_h)
+        self.overlays = [
+            (
+                p["left"] * self.scale, p["top"] * self.scale,
+                (p["left"] + p["width"]) * self.scale,
+                (p["top"] + p["height"]) * self.scale,
+                p,
             )
-        self.status_var.set(f"대상 사진 {len(self.targets)}개 찾음")
-        self._refresh_match_hint()
+            for p in self.ctrl.pictures_on_slide(self.slide_index)
+        ]
+        self._draw()
 
-    def on_target_select(self, _event=None):
-        idx = self._sel(self.target_list)
+    def _draw(self):
+        self.canvas.delete("all")
+        if self.slide_photo is not None:
+            self.canvas.create_image(0, 0, anchor="nw", image=self.slide_photo)
+
+        for (x0, y0, x1, y1, target) in self.overlays:
+            order = self._order_of(target)
+            if order is None:
+                self.canvas.create_rectangle(x0, y0, x1, y1, outline="#4da3ff",
+                                             width=2, dash=(4, 3))
+            else:
+                self.canvas.create_rectangle(x0, y0, x1, y1, outline=self.BADGE_COLORS, width=3)
+                r = 15
+                cx, cy = x0 + r + 3, y0 + r + 3
+                self.canvas.create_oval(cx - r, cy - r, cx + r, cy + r,
+                                        fill=self.BADGE_COLORS, outline="white", width=2)
+                self.canvas.create_text(cx, cy, text=str(order), fill="white",
+                                        font=("Segoe UI", 12, "bold"))
+
+    def on_canvas_click(self, event):
+        if not self.overlays:
+            return
+        hit = None
+        best_area = None
+        for (x0, y0, x1, y1, target) in self.overlays:
+            if x0 <= event.x <= x1 and y0 <= event.y <= y1:
+                area = (x1 - x0) * (y1 - y0)
+                if best_area is None or area < best_area:
+                    best_area = area
+                    hit = target
+        if hit is None:
+            return
+        idx = self._index_in_sequence(hit)
         if idx is None:
-            return
-        t = self.targets[idx]
-        # PPT 화면에서 해당 사진 선택
-        try:
-            self.ctrl.select_shape(t["slide_index"], t["shape_id"])
-        except Exception:
-            pass
-        # 미리보기 (PPT 사진을 PNG 로 내보내서 표시)
-        if HAS_PIL:
-            try:
-                png = os.path.join(self._tmp_dir, f"t_{t['slide_index']}_{t['shape_id']}.png")
-                if self.ctrl.export_shape_png(t["slide_index"], t["shape_id"], png):
-                    self._show_preview(png)
-            except Exception:
-                self.preview_label.configure(image="", text="(미리보기 불가)")
+            hit.setdefault("image", None)
+            self.sequence.append(hit)
+        else:
+            self.sequence.pop(idx)
+        self._draw()
+        self._rebuild_rows()
 
-    def on_new_select(self, _event=None):
-        idx = self._sel(self.new_list)
-        if idx is None:
-            return
-        if HAS_PIL:
-            self._show_preview(self.new_images[idx])
+    def _key(self, t):
+        return (t["slide_index"], t["shape_id"])
 
-    def on_add_images(self):
-        paths = filedialog.askopenfilenames(title="새 이미지 선택", filetypes=IMAGE_TYPES)
-        if not paths:
-            return
-        for p in paths:
-            self.new_images.append(p)
-            self.new_list.insert(tk.END, f"{len(self.new_images)}. {os.path.basename(p)}")
-        self._renumber(self.new_list, self.new_images, name_fn=lambda p: os.path.basename(p))
-        self._refresh_match_hint()
+    def _index_in_sequence(self, target):
+        for i, t in enumerate(self.sequence):
+            if self._key(t) == self._key(target):
+                return i
+        return None
 
-    def on_remove_target(self):
-        idx = self._sel(self.target_list)
-        if idx is None:
-            return
-        del self.targets[idx]
-        self._renumber_targets()
-        self._refresh_match_hint()
+    def _order_of(self, target):
+        i = self._index_in_sequence(target)
+        return None if i is None else i + 1
 
-    def on_remove_new(self):
-        idx = self._sel(self.new_list)
-        if idx is None:
-            return
-        del self.new_images[idx]
-        self._renumber(self.new_list, self.new_images, name_fn=lambda p: os.path.basename(p))
-        self._refresh_match_hint()
+    def clear_sequence(self):
+        self.sequence = []
+        self._draw()
+        self._rebuild_rows()
+
+    def _rebuild_rows(self):
+        for w in self.rows_frame.winfo_children():
+            w.destroy()
+        self._row_thumbs = []
+
+        for i, t in enumerate(self.sequence):
+            row = ttk.Frame(self.rows_frame, padding=4)
+            row.pack(fill="x", pady=2)
+
+            ttk.Label(row, text=str(i + 1), width=2, anchor="center",
+                      background=self.BADGE_COLORS, foreground="white").pack(side="left")
+
+            thumb = tk.Label(row, width=8, height=3, relief="groove", bg="#f0f0f0")
+            thumb.pack(side="left", padx=6)
+            if t.get("image") and HAS_PIL:
+                try:
+                    im = Image.open(t["image"])
+                    im.thumbnail((64, 48))
+                    ph = ImageTk.PhotoImage(im)
+                    self._row_thumbs.append(ph)
+                    thumb.configure(image=ph, width=64, height=48)
+                except Exception:
+                    pass
+
+            mid = ttk.Frame(row)
+            mid.pack(side="left", fill="x", expand=True)
+            name = os.path.basename(t["image"]) if t.get("image") else "(새 파일 없음)"
+            ttk.Label(mid, text=f"[슬라이드 {t['slide_index']}]", foreground="#888").pack(anchor="w")
+            ttk.Label(mid, text=name, wraplength=140).pack(anchor="w")
+
+            ttk.Button(row, text="파일 선택",
+                       command=lambda tt=t: self._pick_file(tt)).pack(side="right")
+
+        self.count_lbl.set(f"선택 {len(self.sequence)}장")
+
+    def _pick_file(self, target):
+        path = filedialog.askopenfilename(title="새 이미지 선택", filetypes=IMAGE_TYPES)
+        if path:
+            target["image"] = path
+            self._rebuild_rows()
 
     def on_replace(self):
-        n = min(len(self.targets), len(self.new_images))
-        if n == 0:
-            messagebox.showwarning("안내", "대상 사진과 새 이미지를 각각 1개 이상 준비해주세요.")
+        if not self.sequence:
+            messagebox.showwarning("안내", "슬라이드에서 바꿀 사진을 먼저 클릭해주세요.")
             return
-        if len(self.targets) != len(self.new_images):
+        missing = [i + 1 for i, t in enumerate(self.sequence) if not t.get("image")]
+        if missing:
             if not messagebox.askyesno(
-                "개수 불일치",
-                f"대상 {len(self.targets)}개 / 새 이미지 {len(self.new_images)}개.\n"
-                f"앞에서부터 {n}쌍만 교체합니다. 계속할까요?"
-            ):
+                "새 파일 없음",
+                f"{missing} 번 항목에 새 파일이 지정되지 않았습니다.\n"
+                f"해당 항목은 건너뛰고 나머지만 교체할까요?"):
                 return
 
-        keep = self.keep_aspect_var.get()
+        keep = self.keep_aspect.get()
         ok, fail = 0, []
-        for i in range(n):
-            t = self.targets[i]
-            img = self.new_images[i]
+        for i, t in enumerate(self.sequence):
+            if not t.get("image"):
+                continue
             try:
-                self.ctrl.replace_picture(t, img, keep_aspect=keep)
+                self.ctrl.replace_picture(t, t["image"], keep_aspect=keep)
                 ok += 1
             except Exception as e:
-                fail.append(f"{i+1}번: {os.path.basename(img)} → {e}")
+                fail.append(f"{i + 1}번: {e}")
 
-        msg = f"완료: {ok}개 교체됨."
+        msg = f"완료: {ok}장 교체됨."
         if fail:
-            msg += "\n\n실패:\n" + "\n".join(fail)
-            messagebox.showwarning("결과", msg)
+            messagebox.showwarning("결과", msg + "\n\n실패:\n" + "\n".join(fail))
         else:
             messagebox.showinfo("결과", msg)
-        self.status_var.set(f"교체 완료: {ok}개")
-        # 교체 후 대상 목록 갱신
-        self.on_scan()
-
-    # -- 보조 함수 -------------------------------------------------------
-    def _sel(self, listbox):
-        s = listbox.curselection()
-        return s[0] if s else None
-
-    def _move(self, listbox, data, delta):
-        idx = self._sel(listbox)
-        if idx is None:
-            return
-        j = idx + delta
-        if j < 0 or j >= len(data):
-            return
-        data[idx], data[j] = data[j], data[idx]
-        if data is self.targets:
-            self._renumber_targets()
-        else:
-            self._renumber(self.new_list, self.new_images,
-                           name_fn=lambda p: os.path.basename(p))
-        listbox.selection_clear(0, tk.END)
-        listbox.selection_set(j)
-        listbox.activate(j)
-
-    def _renumber_targets(self):
-        self.target_list.delete(0, tk.END)
-        for i, t in enumerate(self.targets, 1):
-            self.target_list.insert(
-                tk.END,
-                f"{i}. [슬라이드 {t['slide_index']}] {t['name']}  "
-                f"({int(t['width'])}×{int(t['height'])})"
-            )
-
-    def _renumber(self, listbox, data, name_fn):
-        listbox.delete(0, tk.END)
-        for i, item in enumerate(data, 1):
-            listbox.insert(tk.END, f"{i}. {name_fn(item)}")
-
-    def _refresh_match_hint(self):
-        nt, nn = len(self.targets), len(self.new_images)
-        pairs = min(nt, nn)
-        self.match_var.set(f"매칭 {pairs}쌍  (대상 {nt} / 새 {nn})")
-
-    def _show_preview(self, path):
-        if not HAS_PIL:
-            return
-        try:
-            img = Image.open(path)
-            img.thumbnail((self.THUMB, self.THUMB))
-            self._preview_photo = ImageTk.PhotoImage(img)
-            self.preview_label.configure(image=self._preview_photo, text="")
-        except Exception:
-            self.preview_label.configure(image="", text="(미리보기 불가)")
+        self.status.set(f"교체 완료: {ok}장")
+        self.clear_sequence()
+        self.render_slide()
 
 
 def main():
     if sys.platform != "win32":
         print("이 프로그램은 Windows + PowerPoint 환경에서 실행해야 합니다.")
     try:
-        app = App()
-        app.mainloop()
+        App().mainloop()
     except Exception:
         traceback.print_exc()
         input("오류가 발생했습니다. Enter 를 눌러 종료...")
