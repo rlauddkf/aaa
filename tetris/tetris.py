@@ -1,6 +1,8 @@
 """
-테트리스 (Tetris)
-- 방향키로 이동/회전, Space로 하드드롭
+테트리스 (Tetris) - 엑셀 스프레드시트 위장 테마
+- 방향키로 이동/회전(↑), Space로 하드드롭
+- ←/→/↓ 키는 누르고 있으면 연속 이동
+- 낙하 지점은 '선택된 셀' 테두리처럼 표시
 - ESC를 누르면 프로그램이 즉시 종료됩니다.
 """
 
@@ -10,17 +12,10 @@ import sys
 import pygame
 
 # ---------------------------------------------------------------------------
-# 설정 (Config)
+# 게임판 설정 (Game config)
 # ---------------------------------------------------------------------------
-CELL = 30                 # 셀 한 칸 픽셀 크기
 COLS = 10                 # 보드 가로 칸 수
 ROWS = 20                 # 보드 세로 칸 수
-SIDEBAR = 6 * CELL        # 우측 정보 패널 너비
-
-BOARD_W = COLS * CELL
-BOARD_H = ROWS * CELL
-WIDTH = BOARD_W + SIDEBAR
-HEIGHT = BOARD_H
 
 FPS = 60
 
@@ -29,11 +24,46 @@ DAS_DELAY = 0.16   # 처음 누른 뒤 자동 반복이 시작되기까지의 �
 ARR_RATE = 0.04    # 자동 반복 시 한 칸 이동 간격
 SOFT_DROP_RATE = 0.03  # ↓ 를 누르고 있을 때 낙하 간격
 
-# 색상
-BLACK = (15, 15, 20)
-GRID = (40, 40, 50)
-WHITE = (235, 235, 235)
-GRAY = (120, 120, 130)
+# ---------------------------------------------------------------------------
+# 엑셀 스타일 화면 레이아웃 (Excel-look layout)
+# ---------------------------------------------------------------------------
+CELL = 28                 # 셀 한 칸 픽셀 크기
+GUTTER = 34               # 행 번호(왼쪽) 칸 너비
+COLHDR_H = 20             # 열 머리글(A,B,C...) 높이
+COLS_VIEW = 16            # 화면에 보이는 열 수 (A~P)
+ROWS_VIEW = 22            # 화면에 보이는 행 수
+
+TABS_H = 26               # 리본 탭 줄 높이
+RIBBON_H = 78             # 리본 본문 높이
+FORMULA_H = 26            # 이름상자 + 수식 입력줄 높이
+CHROME_H = TABS_H + RIBBON_H + FORMULA_H  # 격자 위쪽 엑셀 UI 전체 높이
+
+GRID_X0 = GUTTER                    # 셀 격자가 시작되는 x
+GRID_Y0 = CHROME_H + COLHDR_H       # 셀 격자가 시작되는 y
+
+WIDTH = GUTTER + COLS_VIEW * CELL
+HEIGHT = GRID_Y0 + ROWS_VIEW * CELL
+
+INFO_COL = 11             # 점수/라인 등 정보를 표시할 시작 열 (L열)
+
+# 색상 (엑셀 2007 느낌)
+TABBAR_BG = (183, 208, 234)
+TAB_ACTIVE_BG = (245, 248, 252)
+TAB_TEXT = (40, 45, 60)
+RIBBON_BG = (239, 243, 248)
+BTN_BG = (250, 251, 253)
+GROUP_LABEL = (110, 120, 135)
+SEP = (200, 208, 220)
+HDR_BG = (232, 236, 242)
+HDR_TEXT = (90, 100, 115)
+HDR_SEL_BG = (255, 221, 148)
+HDR_SEL_TEXT = (120, 70, 0)
+GRIDLINE = (214, 220, 230)
+CELL_WHITE = (255, 255, 255)
+BLOCK = (38, 38, 38)          # 블록 = 검게 칠해진 셀
+GHOST_BORDER = (55, 110, 70)  # 낙하 지점 = 선택된 셀 테두리처럼
+PAGEBREAK = (150, 160, 175)
+INK = (25, 25, 30)
 
 # 테트로미노 모양 정의 (4x4 회전 기준 좌표)
 SHAPES = {
@@ -193,78 +223,211 @@ class Tetris:
 
 
 # ---------------------------------------------------------------------------
-# 렌더링 (Rendering)
+# 렌더링 (Rendering) - 엑셀 스프레드시트처럼 보이게
 # ---------------------------------------------------------------------------
-def draw_cell(surface, x, y, color):
-    rect = pygame.Rect(x * CELL, y * CELL, CELL, CELL)
-    pygame.draw.rect(surface, color, rect)
-    pygame.draw.rect(surface, BLACK, rect, 2)
+def col_letter(c):
+    """0 -> A, 1 -> B, ... 엑셀 열 문자."""
+    s = ""
+    c += 1
+    while c > 0:
+        c, rem = divmod(c - 1, 26)
+        s = chr(65 + rem) + s
+    return s
 
 
-def draw(surface, game, font, big_font):
-    surface.fill(BLACK)
+def cell_rect(c, r):
+    """격자 상의 (열 c, 행 r) 셀 픽셀 사각형."""
+    return pygame.Rect(GRID_X0 + c * CELL, GRID_Y0 + r * CELL, CELL, CELL)
 
-    # 격자
-    for x in range(COLS):
-        for y in range(ROWS):
-            rect = pygame.Rect(x * CELL, y * CELL, CELL, CELL)
-            pygame.draw.rect(surface, GRID, rect, 1)
 
-    # 고정된 블록
-    for y in range(ROWS):
-        for x in range(COLS):
-            color = game.board[y][x]
-            if color:
-                draw_cell(surface, x, y, color)
+def fill_cell(surface, c, r):
+    """셀을 검게 칠함 (블록 표현)."""
+    if 0 <= c < COLS_VIEW and 0 <= r < ROWS_VIEW:
+        pygame.draw.rect(surface, BLOCK, cell_rect(c, r))
 
-    # 고스트(낙하 지점 미리보기) - 윤곽선으로 표시
-    if not game.game_over:
-        gy = game.ghost_y()
-        for bx, by in game.current.blocks(y=gy):
-            if by >= 0:
-                rect = pygame.Rect(bx * CELL, by * CELL, CELL, CELL)
-                pygame.draw.rect(surface, game.current.color, rect, 2)
 
-    # 현재 조각
-    if not game.game_over:
-        for bx, by in game.current.blocks():
-            if by >= 0:
-                draw_cell(surface, bx, by, game.current.color)
-
-    # 사이드바 구분선
-    pygame.draw.line(surface, GRAY, (BOARD_W, 0), (BOARD_W, HEIGHT), 2)
-
-    sx = BOARD_W + 20
-    surface.blit(font.render("SCORE", True, GRAY), (sx, 20))
-    surface.blit(big_font.render(str(game.score), True, WHITE), (sx, 45))
-    surface.blit(font.render("LINES", True, GRAY), (sx, 100))
-    surface.blit(big_font.render(str(game.lines), True, WHITE), (sx, 125))
-    surface.blit(font.render("LEVEL", True, GRAY), (sx, 180))
-    surface.blit(big_font.render(str(game.level), True, WHITE), (sx, 205))
-
-    # 다음 조각 미리보기
-    surface.blit(font.render("NEXT", True, GRAY), (sx, 270))
-    for cx, cy in game.next_piece.cells:
-        rect = pygame.Rect(sx + cx * CELL, 300 + cy * CELL, CELL, CELL)
-        pygame.draw.rect(surface, game.next_piece.color, rect)
-        pygame.draw.rect(surface, BLACK, rect, 2)
-
-    # 조작 안내
-    tips = ["← → : 이동", "↑ : 회전", "↓ : 소프트드롭",
-            "Space : 하드드롭", "ESC : 종료"]
-    for i, tip in enumerate(tips):
-        surface.blit(font.render(tip, True, GRAY), (sx, 440 + i * 24))
-
-    # 게임 오버
+def active_cell(game):
+    """현재 조각의 좌상단 셀 = 엑셀의 '선택된 셀'로 취급."""
     if game.game_over:
-        overlay = pygame.Surface((BOARD_W, HEIGHT))
-        overlay.set_alpha(200)
-        overlay.fill(BLACK)
-        surface.blit(overlay, (0, 0))
-        msg = big_font.render("GAME OVER", True, (240, 80, 80))
-        surface.blit(msg, (BOARD_W // 2 - msg.get_width() // 2, HEIGHT // 2 - 40))
-        sub = font.render("R: 다시 시작   ESC: 종료", True, WHITE)
-        surface.blit(sub, (BOARD_W // 2 - sub.get_width() // 2, HEIGHT // 2 + 10))
+        return 0, 0
+    blocks = game.current.blocks()
+    c = min(b[0] for b in blocks)
+    r = max(min(b[1] for b in blocks), 0)
+    return c, r
+
+
+def draw_ribbon(surface, fonts):
+    # 리본 탭 줄
+    pygame.draw.rect(surface, TABBAR_BG, (0, 0, WIDTH, TABS_H))
+    tabs = ["Home", "Insert", "Page Layout", "Formulas",
+            "Data", "Review", "View"]
+    active = "View"
+    x = 6
+    for name in tabs:
+        surf = fonts["tab"].render(name, True, TAB_TEXT)
+        w = surf.get_width() + 14
+        if name == active:
+            pygame.draw.rect(surface, TAB_ACTIVE_BG, (x, 3, w, TABS_H - 3))
+            pygame.draw.line(surface, SEP, (x, 3), (x, TABS_H - 1))
+            pygame.draw.line(surface, SEP, (x + w, 3), (x + w, TABS_H - 1))
+        surface.blit(surf, (x + 7, (TABS_H - surf.get_height()) // 2))
+        x += w + 3
+
+    # 리본 본문
+    pygame.draw.rect(surface, RIBBON_BG, (0, TABS_H, WIDTH, RIBBON_H))
+    pygame.draw.line(surface, SEP, (0, TABS_H + RIBBON_H - 1),
+                     (WIDTH, TABS_H + RIBBON_H - 1))
+
+    # View 탭의 그룹들 (버튼은 형태만 흉내)
+    groups = [("Workbook Views", 150), ("Show/Hide", 118), ("Zoom", 112)]
+    gx = 4
+    ry = TABS_H + 6
+    for name, gw in groups:
+        for i in range(3):
+            bx = gx + 8 + i * (min(gw, 130) // 3)
+            pygame.draw.rect(surface, BTN_BG, (bx, ry, 30, 42))
+            pygame.draw.rect(surface, SEP, (bx, ry, 30, 42), 1)
+        lbl = fonts["group"].render(name, True, GROUP_LABEL)
+        surface.blit(lbl, (gx + (gw - lbl.get_width()) // 2,
+                           TABS_H + RIBBON_H - 15))
+        pygame.draw.line(surface, SEP, (gx + gw, ry),
+                         (gx + gw, TABS_H + RIBBON_H - 16))
+        gx += gw + 2
+
+
+def draw_formula_bar(surface, game, fonts):
+    y = TABS_H + RIBBON_H
+    pygame.draw.rect(surface, CELL_WHITE, (0, y, WIDTH, FORMULA_H))
+    # 이름 상자 (선택된 셀 주소 표시)
+    nb_w = GUTTER + CELL
+    pygame.draw.rect(surface, CELL_WHITE, (2, y + 3, nb_w, FORMULA_H - 6))
+    pygame.draw.rect(surface, SEP, (2, y + 3, nb_w, FORMULA_H - 6), 1)
+    c, r = active_cell(game)
+    ref = fonts["cell"].render(f"{col_letter(c)}{r + 1}", True, INK)
+    surface.blit(ref, (8, y + (FORMULA_H - ref.get_height()) // 2))
+    # fx 기호
+    fx = fonts["fx"].render("fx", True, (90, 120, 180))
+    surface.blit(fx, (nb_w + 12, y + (FORMULA_H - fx.get_height()) // 2))
+    # 수식 입력줄
+    fx0 = nb_w + 34
+    pygame.draw.rect(surface, SEP, (fx0, y + 3, WIDTH - fx0 - 4, FORMULA_H - 6), 1)
+    pygame.draw.line(surface, SEP, (0, y + FORMULA_H - 1), (WIDTH, y + FORMULA_H - 1))
+
+
+def draw_headers(surface, game, fonts):
+    ac, ar = active_cell(game)
+    # 좌상단 코너
+    pygame.draw.rect(surface, HDR_BG, (0, CHROME_H, GUTTER, COLHDR_H))
+    pygame.draw.rect(surface, GRIDLINE, (0, CHROME_H, GUTTER, COLHDR_H), 1)
+    # 열 머리글 (A, B, C ...)
+    for c in range(COLS_VIEW):
+        x = GRID_X0 + c * CELL
+        sel = (c == ac)
+        pygame.draw.rect(surface, HDR_SEL_BG if sel else HDR_BG,
+                         (x, CHROME_H, CELL, COLHDR_H))
+        pygame.draw.rect(surface, GRIDLINE, (x, CHROME_H, CELL, COLHDR_H), 1)
+        t = fonts["hdr"].render(col_letter(c), True,
+                                HDR_SEL_TEXT if sel else HDR_TEXT)
+        surface.blit(t, (x + (CELL - t.get_width()) // 2,
+                         CHROME_H + (COLHDR_H - t.get_height()) // 2))
+    # 행 번호 (1, 2, 3 ...)
+    for r in range(ROWS_VIEW):
+        y = GRID_Y0 + r * CELL
+        sel = (r == ar)
+        pygame.draw.rect(surface, HDR_SEL_BG if sel else HDR_BG,
+                         (0, y, GUTTER, CELL))
+        pygame.draw.rect(surface, GRIDLINE, (0, y, GUTTER, CELL), 1)
+        t = fonts["hdr"].render(str(r + 1), True,
+                                HDR_SEL_TEXT if sel else HDR_TEXT)
+        surface.blit(t, (GUTTER - 5 - t.get_width(),
+                         y + (CELL - t.get_height()) // 2))
+
+
+def draw_grid(surface):
+    grid_w = COLS_VIEW * CELL
+    grid_h = ROWS_VIEW * CELL
+    pygame.draw.rect(surface, CELL_WHITE, (GRID_X0, GRID_Y0, grid_w, grid_h))
+    for c in range(COLS_VIEW + 1):
+        x = GRID_X0 + c * CELL
+        pygame.draw.line(surface, GRIDLINE, (x, GRID_Y0), (x, GRID_Y0 + grid_h))
+    for r in range(ROWS_VIEW + 1):
+        y = GRID_Y0 + r * CELL
+        pygame.draw.line(surface, GRIDLINE, (GRID_X0, y), (GRID_X0 + grid_w, y))
+    # 게임판 오른쪽 경계 = 페이지 나누기 선처럼
+    xb = GRID_X0 + COLS * CELL
+    pygame.draw.line(surface, PAGEBREAK, (xb, GRID_Y0), (xb, GRID_Y0 + grid_h), 2)
+
+
+def draw_blocks(surface, game):
+    # 고정된 블록
+    for r in range(ROWS):
+        for c in range(COLS):
+            if game.board[r][c]:
+                fill_cell(surface, c, r)
+    if game.game_over:
+        return
+    # 고스트(낙하 지점) = 선택된 셀 테두리처럼
+    gy = game.ghost_y()
+    for bx, by in game.current.blocks(y=gy):
+        if 0 <= by < ROWS_VIEW:
+            pygame.draw.rect(surface, GHOST_BORDER, cell_rect(bx, by), 2)
+    # 현재 조각
+    for bx, by in game.current.blocks():
+        if by >= 0:
+            fill_cell(surface, bx, by)
+
+
+def draw_info(surface, game, fonts):
+    def put(c, r, text, color=INK, font=None):
+        font = font or fonts["cell"]
+        rect = cell_rect(c, r)
+        t = font.render(text, True, color)
+        surface.blit(t, (rect.x + 3, rect.y + (CELL - t.get_height()) // 2))
+
+    col = INFO_COL
+    put(col, 0, "Score:")
+    put(col + 2, 0, str(game.score))
+    put(col, 2, "Lines:")
+    put(col + 2, 2, str(game.lines))
+    put(col, 4, "Level:")
+    put(col + 2, 4, str(game.level))
+    put(col, 6, "Next:")
+    for cx, cy in game.next_piece.cells:
+        fill_cell(surface, col + cx, 7 + cy)
+
+    tips = ["[ Controls ]", "← →  move (hold)", "↑  rotate",
+            "↓  soft drop (hold)", "Space  hard drop",
+            "R  restart", "Esc  quit"]
+    for i, tip in enumerate(tips):
+        put(col, 12 + i, tip, GROUP_LABEL, fonts["hdr"])
+
+
+def draw_gameover(surface, fonts):
+    bw, bh = 260, 120
+    bx = GRID_X0 + (COLS * CELL - bw) // 2
+    bx = max(bx, GRID_X0 + 4)
+    by = GRID_Y0 + (ROWS_VIEW * CELL - bh) // 2
+    pygame.draw.rect(surface, (250, 250, 252), (bx, by, bw, bh))
+    pygame.draw.rect(surface, (120, 130, 145), (bx, by, bw, bh), 1)
+    pygame.draw.rect(surface, TABBAR_BG, (bx, by, bw, 22))
+    title = fonts["hdr"].render("Microsoft Excel", True, (25, 25, 45))
+    surface.blit(title, (bx + 8, by + 4))
+    msg = fonts["cell"].render("GAME OVER", True, (190, 40, 40))
+    surface.blit(msg, (bx + (bw - msg.get_width()) // 2, by + 42))
+    sub = fonts["kr"].render("R: 다시 시작    Esc: 종료", True, (50, 50, 60))
+    surface.blit(sub, (bx + (bw - sub.get_width()) // 2, by + 78))
+
+
+def draw(surface, game, fonts):
+    surface.fill(CELL_WHITE)
+    draw_grid(surface)
+    draw_blocks(surface, game)
+    draw_info(surface, game, fonts)
+    draw_headers(surface, game, fonts)
+    draw_ribbon(surface, fonts)
+    draw_formula_bar(surface, game, fonts)
+    if game.game_over:
+        draw_gameover(surface, fonts)
 
 
 # ---------------------------------------------------------------------------
@@ -273,10 +436,16 @@ def draw(surface, game, font, big_font):
 def main():
     pygame.init()
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
-    pygame.display.set_caption("Tetris")
+    pygame.display.set_caption("Book1 - Microsoft Excel")
     clock = pygame.time.Clock()
-    font = pygame.font.SysFont("malgungothic,arial", 20)
-    big_font = pygame.font.SysFont("malgungothic,arial", 32, bold=True)
+    fonts = {
+        "tab": pygame.font.SysFont("segoeui,arial", 14),
+        "group": pygame.font.SysFont("segoeui,arial", 10),
+        "hdr": pygame.font.SysFont("arial", 12),
+        "cell": pygame.font.SysFont("arial", 13),
+        "fx": pygame.font.SysFont("arial", 13, italic=True),
+        "kr": pygame.font.SysFont("malgungothic,gulim,nanumgothic,arial", 13),
+    }
 
     game = Tetris()
 
@@ -345,7 +514,7 @@ def main():
                     charged[key] = False
 
         game.update(dt)
-        draw(screen, game, font, big_font)
+        draw(screen, game, fonts)
         pygame.display.flip()
 
 
