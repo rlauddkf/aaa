@@ -1,0 +1,39 @@
+name: Build Tetris EXE
+
+# 이 워크플로는 Windows 러너에서 실행되어 진짜 .exe 파일을 만들고
+# Actions 아티팩트로 업로드합니다. (Linux/Mac에서 Windows exe를 못 만들기 때문)
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "tetris/**"
+      - ".github/workflows/build-exe.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: tetris
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Build exe
+        run: pyinstaller --onefile --windowed --name Tetris tetris.py
+
+      - name: Upload exe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Tetris-Windows-exe
+          path: tetris/dist/Tetris.exe
