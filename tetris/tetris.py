@@ -24,6 +24,11 @@ HEIGHT = BOARD_H
 
 FPS = 60
 
+# 키를 누르고 있을 때 연속 이동 설정 (초 단위)
+DAS_DELAY = 0.16   # 처음 누른 뒤 자동 반복이 시작되기까지의 지연
+ARR_RATE = 0.04    # 자동 반복 시 한 칸 이동 간격
+SOFT_DROP_RATE = 0.03  # ↓ 를 누르고 있을 때 낙하 간격
+
 # 색상
 BLACK = (15, 15, 20)
 GRID = (40, 40, 50)
@@ -176,6 +181,13 @@ class Tetris:
             self.fall_timer = 0.0
             self.soft_drop()
 
+    def ghost_y(self):
+        """현재 조각이 그대로 떨어졌을 때 놓일 y 좌표를 반환."""
+        y = self.current.y
+        while self._valid(self.current.cells, self.current.x, y + 1):
+            y += 1
+        return y
+
     def reset(self):
         self.__init__()
 
@@ -204,6 +216,14 @@ def draw(surface, game, font, big_font):
             color = game.board[y][x]
             if color:
                 draw_cell(surface, x, y, color)
+
+    # 고스트(낙하 지점 미리보기) - 윤곽선으로 표시
+    if not game.game_over:
+        gy = game.ghost_y()
+        for bx, by in game.current.blocks(y=gy):
+            if by >= 0:
+                rect = pygame.Rect(bx * CELL, by * CELL, CELL, CELL)
+                pygame.draw.rect(surface, game.current.color, rect, 2)
 
     # 현재 조각
     if not game.game_over:
@@ -260,6 +280,19 @@ def main():
 
     game = Tetris()
 
+    # 키를 누르고 있을 때의 연속 이동(DAS/ARR) 상태.
+    # 값이 None 이면 "떼어진 상태", 실수면 "누른 뒤 경과 시간".
+    hold = {pygame.K_LEFT: None, pygame.K_RIGHT: None, pygame.K_DOWN: None}
+    charged = {k: False for k in hold}
+
+    def do_action(key):
+        if key == pygame.K_LEFT:
+            game.move(-1)
+        elif key == pygame.K_RIGHT:
+            game.move(1)
+        elif key == pygame.K_DOWN:
+            game.soft_drop()
+
     while True:
         dt = clock.tick(FPS) / 1000.0
 
@@ -276,16 +309,40 @@ def main():
                     if event.key == pygame.K_r:
                         game.reset()
                     continue
-                if event.key == pygame.K_LEFT:
-                    game.move(-1)
-                elif event.key == pygame.K_RIGHT:
-                    game.move(1)
-                elif event.key == pygame.K_UP:
+                # 한 번만 반응하는 키
+                if event.key == pygame.K_UP:
                     game.rotate()
-                elif event.key == pygame.K_DOWN:
-                    game.soft_drop()
                 elif event.key == pygame.K_SPACE:
                     game.hard_drop()
+
+        # 누르고 있는 동안 연속 이동 처리 (←, →, ↓)
+        if game.game_over:
+            for k in hold:
+                hold[k] = None
+                charged[k] = False
+        else:
+            pressed = pygame.key.get_pressed()
+            for key in hold:
+                repeat = ARR_RATE if key != pygame.K_DOWN else SOFT_DROP_RATE
+                if pressed[key]:
+                    if hold[key] is None:
+                        # 방금 눌림 -> 즉시 한 칸 이동 후 DAS 대기 시작
+                        do_action(key)
+                        hold[key] = 0.0
+                        charged[key] = False
+                    else:
+                        hold[key] += dt
+                        if not charged[key]:
+                            if hold[key] >= DAS_DELAY:
+                                charged[key] = True
+                                hold[key] = 0.0
+                                do_action(key)
+                        elif hold[key] >= repeat:
+                            hold[key] = 0.0
+                            do_action(key)
+                else:
+                    hold[key] = None
+                    charged[key] = False
 
         game.update(dt)
         draw(screen, game, font, big_font)
