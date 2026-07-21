@@ -5,10 +5,14 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "npx nodemon server.js"
+    "dev": "npx nodemon server.js",
+    "recommend": "node stock/cli.js",
+    "schedule": "node stock/scheduler.js",
+    "stock:test": "node stock/selftest.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "googleapis": "^140.0.0"
+    "googleapis": "^140.0.0",
+    "node-cron": "^3.0.3"
   }
 }

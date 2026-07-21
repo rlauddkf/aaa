@@ -1,0 +1,7 @@
+node_modules/
+credentials.json
+
+# 추천 결과 로그 (생성물)
+logs/*.txt
+logs/*.json
+!logs/.gitkeep
