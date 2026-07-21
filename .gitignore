@@ -1,6 +1,9 @@
 node_modules/
 credentials.json
 
+# 빌드 산출물(exe 등)
+dist/
+
 # 추천 결과 로그 (생성물)
 logs/*.txt
 logs/*.json

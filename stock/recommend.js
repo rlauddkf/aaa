@@ -10,6 +10,14 @@ const { scoreSymbol } = require('./score');
 
 const ETF_SET = new Set(ETFS);
 
+// 로그 저장 기준 폴더.
+// - exe(pkg)로 실행 시: 스냅샷 내부는 읽기전용이므로 exe 파일이 있는 폴더 사용
+// - 일반 node 실행 시: 프로젝트 루트
+function baseDir() {
+  if (process.pkg) return path.dirname(process.execPath);
+  return path.join(__dirname, '..');
+}
+
 function fmt(n, d = 2) {
   return n == null || Number.isNaN(n) ? 'N/A' : Number(n).toFixed(d);
 }
@@ -116,7 +124,7 @@ function formatReport(result) {
 }
 
 // 리포트를 logs/ 에 저장 (txt + 최신 json)
-function saveReport(result, reportText, dir = path.join(__dirname, '..', 'logs')) {
+function saveReport(result, reportText, dir = path.join(baseDir(), 'logs')) {
   fs.mkdirSync(dir, { recursive: true });
   const stamp = new Date(result.generatedAt).toISOString().slice(0, 10);
   const txtPath = path.join(dir, `recommendation-${stamp}.txt`);

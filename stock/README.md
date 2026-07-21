@@ -9,20 +9,33 @@
 
 ---
 
-## 빠른 시작
+## 방법 A. EXE로 쓰기 (코딩 없이, 추천)
+
+프로젝트 폴더에 있는 배치 파일을 **더블클릭** 하면 됩니다.
+
+1. **`1_EXE만들기.bat`** 더블클릭 → `dist\미국장단타추천.exe` 생성 (최초 1회)
+2. 만들어진 **`dist\미국장단타추천.exe`** 더블클릭 → 오늘의 추천 종목이 바로 표시
+3. (선택) **`2_매일자동실행_등록.bat`** 더블클릭 → 매일 저녁 5시 30분 자동 실행 등록
+   - Windows 작업 스케줄러에 등록되어 창을 켜두지 않아도 됩니다.
+   - 결과는 `dist\logs\` 폴더에 txt로 저장됩니다.
+   - 해제하려면 `자동실행_해제.bat` 실행
+
+## 방법 B. 명령어로 쓰기 (개발자용)
 
 ```bash
-npm install          # 최초 1회 (node-cron 설치)
+npm install          # 최초 1회
 
-# 1) 지금 즉시 한 번 분석
-npm run recommend
-
-# 2) 매일 저녁 5시 30분에 자동 실행 (프로세스 계속 실행)
-npm run schedule
+npm run recommend    # 지금 즉시 한 번 분석
+npm run schedule     # 매일 저녁 5시 30분 자동 실행 (창을 켜둔 채 대기)
+npm run build:exe    # exe 직접 빌드 → dist/미국장단타추천.exe
 ```
 
-`npm run schedule` 를 켜두면 매일 17:30(KST)에 자동으로 분석해서
-추천 종목을 출력하고 `logs/recommendation-YYYY-MM-DD.txt` 로 저장합니다.
+### exe 실행 모드 (인자)
+| 실행 | 동작 |
+|------|------|
+| 그냥 더블클릭 / `exe` | 1회 분석 → 결과 표시 → 키 입력 대기 |
+| `exe once-quiet` | 1회 분석 후 조용히 종료 (자동 실행용) |
+| `exe schedule` | 매일 17:30 자동 실행, 창 켜둔 채 대기 |
 
 ---
 
@@ -81,8 +94,7 @@ stock/
 ├── indicators.js   지표 계산 (ATR, RSI, EMA, RVOL, 모멘텀 등)
 ├── score.js        단타 적합도 스코어링 알고리즘
 ├── recommend.js    수집→계산→스코어→1위 선정→리포트 생성/저장
-├── cli.js          즉시 1회 실행  (npm run recommend)
-├── scheduler.js    매일 17:30 자동 실행 (npm run schedule)
+├── app.js          exe 진입점 (once / once-quiet / schedule 모드)
 └── selftest.js     오프라인 알고리즘 검증 (npm run stock:test)
 ```
 
