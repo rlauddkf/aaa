@@ -8,6 +8,11 @@
 //
 // 환경변수 REC_CRON / REC_TZ / RUN_NOW 는 scheduler 모드에서 그대로 적용됩니다.
 
+// Windows 콘솔에서 한글이 깨지지 않도록 코드페이지를 UTF-8(65001)로 전환
+if (process.platform === 'win32') {
+  try { require('child_process').execSync('chcp 65001', { stdio: 'ignore' }); } catch (_) {}
+}
+
 const { runRecommendation, formatReport, saveReport } = require('./recommend');
 
 function waitKey(msg = '\n엔터 키를 누르면 창이 닫힙니다...') {

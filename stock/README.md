@@ -13,8 +13,8 @@
 
 프로젝트 폴더에 있는 배치 파일을 **더블클릭** 하면 됩니다.
 
-1. **`1_EXE만들기.bat`** 더블클릭 → `dist\미국장단타추천.exe` 생성 (최초 1회)
-2. 만들어진 **`dist\미국장단타추천.exe`** 더블클릭 → 오늘의 추천 종목이 바로 표시
+1. **`1_EXE만들기.bat`** 더블클릭 → `dist\stock-recommend.exe` 생성 (최초 1회)
+2. 만들어진 **`dist\stock-recommend.exe`** 더블클릭 → 오늘의 추천 종목이 바로 표시
 3. (선택) **`2_매일자동실행_등록.bat`** 더블클릭 → 매일 저녁 5시 30분 자동 실행 등록
    - Windows 작업 스케줄러에 등록되어 창을 켜두지 않아도 됩니다.
    - 결과는 `dist\logs\` 폴더에 txt로 저장됩니다.
@@ -27,7 +27,7 @@ npm install          # 최초 1회
 
 npm run recommend    # 지금 즉시 한 번 분석
 npm run schedule     # 매일 저녁 5시 30분 자동 실행 (창을 켜둔 채 대기)
-npm run build:exe    # exe 직접 빌드 → dist/미국장단타추천.exe
+npm run build:exe    # exe 직접 빌드 → dist/stock-recommend.exe
 ```
 
 ### exe 실행 모드 (인자)

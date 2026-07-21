@@ -9,7 +9,7 @@
     "recommend": "node stock/app.js once-quiet",
     "schedule": "node stock/app.js schedule",
     "stock:test": "node stock/selftest.js",
-    "build:exe": "pkg . --targets node22-win-x64 --output dist/미국장단타추천.exe"
+    "build:exe": "pkg . --targets node22-win-x64 --output dist/stock-recommend.exe"
   },
   "bin": "stock/app.js",
   "pkg": {
