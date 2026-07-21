@@ -1,7 +1,7 @@
 name: Build Tetris EXE
 
-# 이 워크플로는 Windows 러너에서 실행되어 진짜 .exe 파일을 만들고
-# Actions 아티팩트로 업로드합니다. (Linux/Mac에서 Windows exe를 못 만들기 때문)
+# Windows / macOS 러너에서 각각 실행파일을 빌드해 아티팩트로 업로드합니다.
+# (각 OS용 실행파일은 반드시 그 OS에서 빌드해야 하므로 러너를 나눕니다.)
 
 on:
   push:
@@ -13,7 +13,20 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: Tetris-Windows-exe
+            path: tetris/dist/Tetris.exe
+          - os: macos-14        # Apple Silicon (M1/M2/M3...)
+            artifact: Tetris-macOS-AppleSilicon
+            path: tetris/dist/Tetris-macOS.zip
+          - os: macos-13        # Intel 맥
+            artifact: Tetris-macOS-Intel
+            path: tetris/dist/Tetris-macOS.zip
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         working-directory: tetris
@@ -29,11 +42,16 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
-      - name: Build exe
+      - name: Build
         run: pyinstaller --onefile --windowed --name Tetris tetris.py
 
-      - name: Upload exe artifact
+      # 맥은 .app(폴더)로 나오므로 실행 권한을 보존하며 zip으로 압축
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: ditto -c -k --keepParent dist/Tetris.app dist/Tetris-macOS.zip
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Tetris-Windows-exe
-          path: tetris/dist/Tetris.exe
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.path }}
