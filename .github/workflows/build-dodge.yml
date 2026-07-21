@@ -1,0 +1,53 @@
+name: Build Dodge Game
+
+# 무한 피하기 게임을 Windows / macOS 실행파일로 빌드해 아티팩트로 업로드합니다.
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "dodge/**"
+      - ".github/workflows/build-dodge.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: Dodge-Windows-exe
+            path: dodge/dist/Dodge.exe
+          - os: macos-14        # Apple Silicon (M1/M2/M3...)
+            artifact: Dodge-macOS-AppleSilicon
+            path: dodge/dist/Dodge-macOS.zip
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: dodge
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Build
+        run: pyinstaller --onefile --windowed --name Dodge game.py
+
+      # 맥은 .app(폴더)로 나오므로 실행 권한을 보존하며 zip으로 압축
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: ditto -c -k --keepParent dist/Dodge.app dist/Dodge-macOS.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.path }}
