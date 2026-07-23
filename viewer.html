@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-<title>4Bay 아파트 평면도 3D 뷰어</title>
+<title>59㎡A 평면도 3D 뷰어</title>
 </head>
 <body>
 <style>
@@ -101,9 +101,9 @@
 <canvas id="stage"></canvas>
 
 <div class="topbar">
-  <h1><span class="dot"></span>4Bay 아파트 · 평면도 3D 뷰어</h1>
+  <h1><span class="dot"></span>59㎡A · 평면도 3D 뷰어</h1>
   <div class="meta">
-    <span>표준 <b>4베이</b> 판상형</span>
+    <span>침실1 · 거실 · 침실2·3 구조</span>
     <span>드래그로 회전 · 각 실 치수(mm) 표시</span>
   </div>
 </div>
@@ -125,8 +125,8 @@
   <div class="row">
     <div class="slider">
       <span>벽 높이</span>
-      <input type="range" id="wallH" min="300" max="2600" step="100" value="1300">
-      <span class="val mono" id="wallHVal">1300mm</span>
+      <input type="range" id="wallH" min="300" max="2600" step="100" value="1100">
+      <span class="val mono" id="wallHVal">1100mm</span>
     </div>
   </div>
 </div>
@@ -141,56 +141,57 @@
 (function(){
 "use strict";
 
-/* ---------- Standard 4-bay apartment (mm). Plan coords: x → east(right), y → south(down). ----------
-   Clean 4-bay (판상형) shape; room dimensions use the measured values from the source drawing
-   (bathrooms 1120×1586 · 1256×1586, doors 880·946·965·612, windows 1930·1515·1369·1450·1056 …). */
+/* ---------- 59㎡A structure (mm). Plan coords: x → east(right), y → south(down). ----------
+   Room ARRANGEMENT follows the 59㎡A ISO view; every DIMENSION is taken from the measured
+   drawing (침실1 1930×2100, 욕실/방 1120×1586 · 1256×1586, doors 880·965·612·799·550·680,
+   windows 1515·1450·1369·1056 …). All walls share one height for clear visibility. */
 const rooms = [
-  // ---- front bay (남향, 발코니 측) ----
-  {id:'bed1',  name:'안방',      type:'room',    x1:0,     y1:2900, x2:3300,  y2:5900},  // 3300×3000
-  {id:'liv',   name:'거실',      type:'room',    x1:3300,  y1:2900, x2:6900,  y2:5900},  // 3600×3000
-  {id:'bed2',  name:'침실2',    type:'room',    x1:6900,  y1:3300, x2:9500,  y2:5900},  // 2600×2600
-  {id:'bed3',  name:'침실3',    type:'room',    x1:9500,  y1:3300, x2:11900, y2:5900},  // 2400×2600
+  // ---- front (남향, 발코니 측) ----
+  {id:'bed1',  name:'침실1',    type:'room',    x1:0,    y1:1800, x2:1930, y2:3900},  // 1930×2100
+  {id:'liv',   name:'거실',      type:'room',    x1:1930, y1:1800, x2:4330, y2:3900},  // 2400×2100
+  {id:'bed2',  name:'침실2',    type:'room',    x1:4330, y1:2314, x2:5450, y2:3900},  // 1120×1586
+  {id:'bed3',  name:'침실3',    type:'room',    x1:5450, y1:2314, x2:6706, y2:3900},  // 1256×1586
   // ---- back / service ----
-  {id:'dress', name:'드레스룸',  type:'room',    x1:0,     y1:1314, x2:2180,  y2:2900},  // 2180×1586
-  {id:'bath1', name:'욕실1',    type:'room',    x1:2180,  y1:1314, x2:3300,  y2:2900},  // 1120×1586
-  {id:'kit',   name:'주방/식당', type:'room',    x1:3300,  y1:800,  x2:6900,  y2:2900},  // 3600×2100
-  {id:'ent',   name:'현관',      type:'room',    x1:6900,  y1:2000, x2:9500,  y2:2900},  // 2600×900
-  {id:'hall',  name:'복도',      type:'room',    x1:6900,  y1:2900, x2:11900, y2:3300},  // 5000×400
-  {id:'bath2', name:'욕실2',    type:'room',    x1:9500,  y1:1314, x2:10756, y2:2900},  // 1256×1586
-  {id:'pan',   name:'팬트리',    type:'room',    x1:10756, y1:1314, x2:11900, y2:2900},  // 1144×1586
+  {id:'ac',    name:'실외기실',  type:'util',    x1:0,    y1:0,    x2:900,  y2:600 },  // 900×600
+  {id:'dress', name:'드레스룸',  type:'room',    x1:0,    y1:600,  x2:1056, y2:1800},  // 1056×1200
+  {id:'bath1', name:'욕실1',    type:'room',    x1:1056, y1:600,  x2:1930, y2:1800},  // 874×1200
+  {id:'kit',   name:'주방/식당', type:'room',    x1:1930, y1:600,  x2:4330, y2:1800},  // 2400×1200
+  {id:'ent',   name:'현관',      type:'room',    x1:4330, y1:728,  x2:5450, y2:1914},  // 1120×1186
+  {id:'bath2', name:'욕실2',    type:'room',    x1:5450, y1:728,  x2:6706, y2:1914},  // 1256×1186
+  {id:'hall',  name:'복도',      type:'room',    x1:4330, y1:1914, x2:6706, y2:2314},  // 2376×400
   // ---- balconies / service (주거공용) ----
-  {id:'balK',  name:'주방 발코니',type:'balcony', x1:3300,  y1:0,    x2:6900,  y2:800 },
-  {id:'evac',  name:'대피공간',  type:'balcony', x1:0,     y1:5900, x2:1000,  y2:7100},
-  {id:'balF',  name:'발코니',     type:'balcony', x1:1000,  y1:5900, x2:11900, y2:7100},
+  {id:'balK',  name:'주방 발코니',type:'balcony', x1:1930, y1:0,    x2:4330, y2:600 },
+  {id:'evac',  name:'대피공간',  type:'balcony', x1:0,    y1:3900, x2:900,  y2:5100},
+  {id:'balF',  name:'발코니',     type:'balcony', x1:900,  y1:3900, x2:6706, y2:5100},
 ];
 
 // Doors: axis 'h' spans x at constant y (cy); axis 'v' spans y at constant x (cx).
 const doors = [
-  {axis:'v', cx:3300,  cy:4400, w:946,  hinge:'top',   swing:'left', label:'946'},  // 안방 ← 거실
-  {axis:'h', cy:2900,  cx:1000, w:880,  hinge:'left',  swing:'up',   label:'880'},  // 드레스룸
-  {axis:'h', cy:2900,  cx:2740, w:800,  hinge:'right', swing:'up',   label:'800'},  // 욕실1
-  {axis:'h', cy:3300,  cx:8200, w:880,  hinge:'left',  swing:'down', label:'880'},  // 침실2 ← 복도
-  {axis:'h', cy:3300,  cx:10700,w:880,  hinge:'right', swing:'down', label:'880'},  // 침실3 ← 복도
-  {axis:'h', cy:2900,  cx:10128,w:700,  hinge:'left',  swing:'up',   label:'700'},  // 욕실2 ← 복도
-  {axis:'h', cy:2000,  cx:8200, w:965,  hinge:'left',  swing:'down', label:'965'},  // 현관 (현관문)
-  {axis:'v', cx:1000,  cy:6500, w:612,  hinge:'top',   swing:'right',label:'612'},  // 대피공간
+  {axis:'v', cx:1930, cy:2850, w:880, hinge:'top',   swing:'left', label:'880'},  // 침실1 ← 거실
+  {axis:'h', cy:1800, cx:528,  w:550, hinge:'left',  swing:'up',   label:'550'},  // 드레스룸
+  {axis:'h', cy:1800, cx:1490, w:680, hinge:'right', swing:'up',   label:'680'},  // 욕실1
+  {axis:'h', cy:2314, cx:4890, w:612, hinge:'left',  swing:'down', label:'612'},  // 침실2 ← 복도
+  {axis:'h', cy:2314, cx:6078, w:799, hinge:'right', swing:'down', label:'799'},  // 침실3 ← 복도
+  {axis:'h', cy:1914, cx:6078, w:700, hinge:'right', swing:'up',   label:'700'},  // 욕실2 ← 복도
+  {axis:'h', cy:728,  cx:4890, w:965, hinge:'left',  swing:'down', label:'965'},  // 현관 (현관문)
 ];
 
 // Windows: translucent glass filling the gap (also drawn as yellow markers).
 const windows = [
-  {axis:'h', cy:5900,  cx:1650, w:1930},   // 안방  → 발코니 (1930)
-  {axis:'h', cy:5900,  cx:5100, w:2600},   // 거실  → 발코니
-  {axis:'h', cy:5900,  cx:8200, w:1515},   // 침실2 (남향, 1515)
-  {axis:'h', cy:5900,  cx:10700,w:1369},   // 침실3 (남향, 1369)
-  {axis:'h', cy:800,   cx:5100, w:1450},   // 주방  → 주방발코니 (1450)
-  {axis:'v', cx:0,     cy:4400, w:1056},   // 안방  서측 (1056)
-  {axis:'v', cx:11900, cy:4600, w:1200},   // 침실3 동측
+  {axis:'h', cy:3900, cx:965,  w:1515},   // 침실1 → 발코니 (1515)
+  {axis:'h', cy:3900, cx:3130, w:1800},   // 거실  → 발코니
+  {axis:'h', cy:3900, cx:4890, w:900 },   // 침실2 (남향)
+  {axis:'h', cy:3900, cx:6078, w:1056},   // 침실3 (남향, 1056)
+  {axis:'h', cy:600,  cx:3130, w:1450},   // 주방  → 주방발코니 (1450)
+  {axis:'v', cx:0,    cy:2850, w:1369},   // 침실1 서측 (1369)
+  {axis:'v', cx:6706, cy:1320, w:700 },   // 욕실2 동측
 ];
 
-// Voids: open connections that cut the wall but render nothing (LDK openness).
+// Voids: open connections that cut the wall but render nothing (circulation openness).
 const voids = [
-  {axis:'h', cy:2900, cx:5100, w:2600},    // 거실 ↔ 주방/식당
-  {axis:'h', cy:2900, cx:8200, w:1600},    // 현관 ↔ 복도
+  {axis:'h', cy:1800, cx:3130, w:2000},   // 거실 ↔ 주방/식당
+  {axis:'v', cx:4330, cy:2114, w:400 },   // 거실 ↔ 복도
+  {axis:'h', cy:1914, cx:4890, w:1000},   // 현관 ↔ 복도
 ];
 
 const openings = doors.concat(windows).concat(voids);
@@ -204,7 +205,7 @@ const SPAN = Math.max(BX2-BX1, BY2-BY1);
 const cam = {yaw:0.58, pitch:0.98, dist:SPAN*1.5, tx:CENTER.x, ty:CENTER.y, tz:CENTER.z};
 const DEFAULT_CAM = Object.assign({}, cam);
 
-let WALL_H = 1300;
+let WALL_H = 1100;
 let showDims=true, showLabels=true, ghost=false;
 
 const cv = document.getElementById('stage');
@@ -288,7 +289,7 @@ function buildFaces(){
   const wallCol=[0xba,0xb2,0xa5];
   const seen=new Set();
   rooms.forEach(r=>{
-    const h = r.type==='balcony' ? Math.min(WALL_H,480) : WALL_H;
+    const h = WALL_H;   // uniform wall height for clear visibility
     const edges=[['h',r.y1,r.x1,r.x2],['h',r.y2,r.x1,r.x2],['v',r.x1,r.y1,r.y2],['v',r.x2,r.y1,r.y2]];
     edges.forEach(e=>{
       const key=e.join(':')+':'+h; if(seen.has(key))return; seen.add(key);
