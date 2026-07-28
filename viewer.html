@@ -83,6 +83,23 @@
   .rm .dim b{color:var(--accent);font-weight:600}
   .rm.bal .nm{color:var(--muted)}
 
+  /* Editor */
+  .editor{left:16px;top:96px;width:266px;padding:12px}
+  .editor h2{margin:2px 4px 10px;font-size:11px;font-weight:600;letter-spacing:.7px;text-transform:uppercase;color:var(--muted)}
+  .ed-empty{font-size:12px;color:var(--muted);padding:4px 4px 2px;line-height:1.5}
+  .ed-row{display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:12px;color:var(--muted)}
+  .ed-row>span{width:46px;flex:none}
+  .ed-row input{flex:1;min-width:0;background:var(--bg2);border:1px solid var(--line);color:var(--ink);
+    border-radius:8px;padding:7px 9px;font-size:12.5px;font-family:inherit}
+  .ed-row.num input{font-family:ui-monospace,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}
+  .ed-row input:focus{outline:none;border-color:var(--accent)}
+  .ed-two{display:flex;gap:8px}
+  .ed-two .ed-row{flex:1;margin-bottom:8px}
+  .ed-two .ed-row>span{width:auto}
+  .ed-btns{display:flex;gap:7px;margin-top:3px}
+  button.tool.danger:hover{border-color:#e5484d;color:#e5484d}
+  .ed-note{font-size:10.5px;color:var(--muted);margin:9px 2px 0;line-height:1.5;opacity:.85}
+
   .hint{
     position:fixed;bottom:16px;left:50%;transform:translateX(-50%);z-index:5;
     font-size:11px;color:var(--muted);background:var(--panel);border:1px solid var(--line);
@@ -93,6 +110,7 @@
   @media (max-width:760px){
     .controls{width:calc(100% - 32px)}
     .rooms{display:none}
+    .editor{display:none}
     .topbar .meta{display:none}
     .hint{display:none}
   }
@@ -112,6 +130,27 @@
   <h2>실 · 치수</h2>
 </div>
 
+<div class="panel editor" id="editor" hidden>
+  <h2>방 편집</h2>
+  <div class="ed-empty" id="edEmpty">오른쪽 목록에서 방을 선택하면<br>이름과 치수를 바꿀 수 있어요.</div>
+  <div id="edForm" hidden>
+    <label class="ed-row"><span>이름</span><input id="edName" type="text" maxlength="20"></label>
+    <div class="ed-two">
+      <label class="ed-row num"><span>가로</span><input id="edW" type="number" step="10" min="200"></label>
+      <label class="ed-row num"><span>세로</span><input id="edD" type="number" step="10" min="200"></label>
+    </div>
+    <div class="ed-two">
+      <label class="ed-row num"><span>위치 X</span><input id="edX" type="number" step="10"></label>
+      <label class="ed-row num"><span>위치 Y</span><input id="edY" type="number" step="10"></label>
+    </div>
+    <div class="ed-btns">
+      <button class="tool" id="edAdd">+ 방 추가</button>
+      <button class="tool danger" id="edDel">삭제</button>
+    </div>
+    <p class="ed-note">단위 mm · 변경사항은 이 브라우저에 자동 저장됩니다.</p>
+  </div>
+</div>
+
 <div class="panel controls">
   <div class="row">
     <button class="tool" id="btnReset">시점 초기화</button>
@@ -128,6 +167,10 @@
       <input type="range" id="wallH" min="300" max="2600" step="100" value="1100">
       <span class="val mono" id="wallHVal">1100mm</span>
     </div>
+  </div>
+  <div class="row">
+    <button class="tool" id="btnEdit">✎ 방 편집</button>
+    <button class="tool" id="btnResetRooms">기본값</button>
   </div>
 </div>
 
@@ -196,11 +239,21 @@ const voids = [
 
 const openings = doors.concat(windows).concat(voids);
 
-/* ---------- bounds / target ---------- */
-let BX1=1e9,BY1=1e9,BX2=-1e9,BY2=-1e9;
-rooms.forEach(r=>{BX1=Math.min(BX1,r.x1);BY1=Math.min(BY1,r.y1);BX2=Math.max(BX2,r.x2);BY2=Math.max(BY2,r.y2);});
-const CENTER = {x:(BX1+BX2)/2, y:400, z:(BY1+BY2)/2};
-const SPAN = Math.max(BX2-BX1, BY2-BY1);
+/* ---------- persistence + bounds ---------- */
+const STORE_KEY='viewer_rooms_v2';
+const DEFAULT_ROOMS = JSON.parse(JSON.stringify(rooms));
+(function loadSaved(){ try{ const s=JSON.parse(localStorage.getItem(STORE_KEY)); if(Array.isArray(s)&&s.length){ rooms.length=0; s.forEach(r=>rooms.push(r)); } }catch(e){} })();
+function saveRooms(){ try{ localStorage.setItem(STORE_KEY, JSON.stringify(rooms)); }catch(e){} }
+
+let BX1,BY1,BX2,BY2,CENTER,SPAN;
+function recomputeBounds(){
+  BX1=1e9;BY1=1e9;BX2=-1e9;BY2=-1e9;
+  rooms.forEach(r=>{BX1=Math.min(BX1,r.x1);BY1=Math.min(BY1,r.y1);BX2=Math.max(BX2,r.x2);BY2=Math.max(BY2,r.y2);});
+  if(!isFinite(BX1)){BX1=0;BY1=0;BX2=2000;BY2=2000;}
+  CENTER={x:(BX1+BX2)/2, y:400, z:(BY1+BY2)/2};
+  SPAN=Math.max(BX2-BX1, BY2-BY1)||2000;
+}
+recomputeBounds();
 
 const cam = {yaw:0.58, pitch:0.98, dist:SPAN*1.5, tx:CENTER.x, ty:CENTER.y, tz:CENTER.z};
 const DEFAULT_CAM = Object.assign({}, cam);
@@ -387,6 +440,7 @@ function drawGrid(){
 }
 
 function draw(){
+  recomputeBounds();
   buildView();
   bgGradient();
   drawGrid();
@@ -502,24 +556,33 @@ function roundRect(x,y,w,h,r){
 }
 
 /* ---------- room list ---------- */
-let activeRoom=null;
+let activeRoom=null, editMode=false;
+function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function roomRowHTML(r){
+  const w=r.x2-r.x1, d=r.y2-r.y1;
+  const areaTxt = r.type!=='balcony'? `<small>${areaM2(r).toFixed(1)}㎡</small>`:'';
+  return `<span class="nm">${esc(r.name)}${areaTxt}</span>`+
+    `<span class="dim mono"><b>${w}</b>×<b>${d}</b><br>mm</span>`;
+}
 function buildRoomList(){
   const el=document.getElementById('roomList');
+  el.querySelectorAll('.rm').forEach(n=>n.remove());
   rooms.forEach(r=>{
-    const w=r.x2-r.x1, d=r.y2-r.y1;
     const div=document.createElement('div');
-    div.className='rm'+(r.type==='balcony'?' bal':''); div.dataset.id=r.id;
-    const areaTxt = r.type!=='balcony'? `<small>${areaM2(r).toFixed(1)}㎡</small>`:'';
-    div.innerHTML=`<span class="nm">${r.name}${areaTxt}</span>`+
-      `<span class="dim mono"><b>${w}</b>×<b>${d}</b><br>mm</span>`;
-    div.addEventListener('click',()=>focusRoom(r));
+    div.className='rm'+(r.type==='balcony'?' bal':'')+(r.id===activeRoom?' active':'');
+    div.dataset.id=r.id;
+    div.innerHTML=roomRowHTML(r);
+    div.addEventListener('click',()=>selectRoom(r));
     el.appendChild(div);
   });
 }
-function focusRoom(r){
+function updateListItem(r){ const el=document.querySelector('.rm[data-id="'+r.id+'"]'); if(el) el.innerHTML=roomRowHTML(r); }
+function curRoom(){ return rooms.find(r=>r.id===activeRoom)||null; }
+function selectRoom(r){
   activeRoom=r.id;
   document.querySelectorAll('.rm').forEach(e=>e.classList.toggle('active', e.dataset.id===r.id));
   animateTo({tx:(r.x1+r.x2)/2, tz:(r.y1+r.y2)/2, dist:Math.max(r.x2-r.x1,r.y2-r.y1)*2.6+2200});
+  if(editMode) fillEditor(r);
 }
 
 /* ---------- camera anim ---------- */
@@ -583,8 +646,33 @@ cv.addEventListener('touchmove',e=>{
 cv.addEventListener('touchend',e=>{touchMode=e.touches.length;},{passive:false});
 function tdd(e){return Math.hypot(e.touches[0].clientX-e.touches[1].clientX, e.touches[0].clientY-e.touches[1].clientY);}
 
+/* ---------- room editor ---------- */
+const editor=document.getElementById('editor');
+const edForm=document.getElementById('edForm'), edEmpty=document.getElementById('edEmpty');
+const edName=document.getElementById('edName'), edW=document.getElementById('edW'),
+      edD=document.getElementById('edD'), edX=document.getElementById('edX'), edY=document.getElementById('edY');
+function fillEditor(r){ edEmpty.hidden=true; edForm.hidden=false; edName.value=r.name; edW.value=r.x2-r.x1; edD.value=r.y2-r.y1; edX.value=r.x1; edY.value=r.y1; }
+function clearEditor(){ edForm.hidden=true; edEmpty.hidden=false; }
+edName.addEventListener('input',()=>{const r=curRoom(); if(!r)return; r.name=edName.value; updateListItem(r); saveRooms(); draw();});
+function numEdit(inp,fn){ inp.addEventListener('input',()=>{const r=curRoom(); if(!r)return; fn(r, Math.round(+inp.value||0)); updateListItem(r); saveRooms(); draw();}); }
+numEdit(edW,(r,v)=>{ r.x2=r.x1+Math.max(200,v); });
+numEdit(edD,(r,v)=>{ r.y2=r.y1+Math.max(200,v); });
+numEdit(edX,(r,v)=>{ const w=r.x2-r.x1; r.x1=v; r.x2=v+w; });
+numEdit(edY,(r,v)=>{ const d=r.y2-r.y1; r.y1=v; r.y2=v+d; });
+document.getElementById('edAdd').onclick=()=>{
+  const cx=Math.round(CENTER.x-750), cy=Math.round(CENTER.z-750);
+  const nr={id:'r'+Date.now(), name:'새 방', type:'room', x1:cx, y1:cy, x2:cx+1500, y2:cy+1500};
+  rooms.push(nr); activeRoom=nr.id; saveRooms(); buildRoomList(); fillEditor(nr); draw();
+};
+document.getElementById('edDel').onclick=()=>{
+  const r=curRoom(); if(!r)return;
+  const i=rooms.indexOf(r); if(i>=0) rooms.splice(i,1);
+  activeRoom=null; saveRooms(); buildRoomList(); clearEditor(); draw();
+};
+
 /* ---------- buttons ---------- */
-document.getElementById('btnReset').onclick=()=>{Object.assign(cam,DEFAULT_CAM);activeRoom=null;document.querySelectorAll('.rm').forEach(e=>e.classList.remove('active'));draw();};
+function frameAll(){ recomputeBounds(); cam.yaw=DEFAULT_CAM.yaw; cam.pitch=DEFAULT_CAM.pitch; cam.dist=SPAN*1.5; cam.tx=CENTER.x; cam.ty=CENTER.y; cam.tz=CENTER.z; }
+document.getElementById('btnReset').onclick=()=>{frameAll();activeRoom=null;document.querySelectorAll('.rm').forEach(e=>e.classList.remove('active'));clearEditor();draw();};
 document.getElementById('btnTop').onclick=()=>{cam.pitch=1.549;cam.yaw=0;cam.dist=SPAN*2.1;cam.tx=CENTER.x;cam.ty=CENTER.y;cam.tz=CENTER.z;draw();};
 const bDims=document.getElementById('btnDims'), bLab=document.getElementById('btnLabels'), bGhost=document.getElementById('btnGhost');
 bDims.onclick=()=>{showDims=!showDims;bDims.classList.toggle('on',showDims);draw();};
@@ -592,6 +680,16 @@ bLab.onclick=()=>{showLabels=!showLabels;bLab.classList.toggle('on',showLabels);
 bGhost.onclick=()=>{ghost=!ghost;bGhost.classList.toggle('on',ghost);draw();};
 const wh=document.getElementById('wallH'), whv=document.getElementById('wallHVal');
 wh.oninput=()=>{WALL_H=+wh.value;whv.textContent=WALL_H+'mm';draw();};
+const btnEdit=document.getElementById('btnEdit');
+btnEdit.onclick=()=>{
+  editMode=!editMode; btnEdit.classList.toggle('on',editMode); editor.hidden=!editMode;
+  if(editMode){ const r=curRoom(); r?fillEditor(r):clearEditor(); }
+};
+document.getElementById('btnResetRooms').onclick=()=>{
+  rooms.length=0; JSON.parse(JSON.stringify(DEFAULT_ROOMS)).forEach(r=>rooms.push(r));
+  activeRoom=null; try{localStorage.removeItem(STORE_KEY);}catch(e){}
+  buildRoomList(); clearEditor(); frameAll(); draw();
+};
 
 window.matchMedia('(prefers-color-scheme: light)').addEventListener('change',draw);
 new MutationObserver(draw).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
