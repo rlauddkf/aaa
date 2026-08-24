@@ -142,7 +142,7 @@ class PowerPointController:
                 continue
         return slide, None
 
-    def replace_picture(self, target, image_path, keep_aspect=False):
+    def replace_picture(self, target, image_path, keep_aspect=False, lock_ratio=True):
         slide, old = self.find_shape(target["slide_index"], target["shape_id"])
         if old is None:
             raise RuntimeError("대상 사진을 찾을 수 없습니다 (이미 변경됨).")
@@ -161,6 +161,12 @@ class PowerPointController:
         )
         if keep_aspect:
             self._fit_keep_aspect(new_shape, left, top, width, height)
+        # 교체된 사진에 가로세로 비율 잠금을 자동 적용 (이후 크기 조절 시 찌그러짐 방지)
+        if lock_ratio:
+            try:
+                new_shape.LockAspectRatio = MSO_TRUE
+            except Exception:
+                pass
         try:
             new_shape.Rotation = rotation
         except Exception:
@@ -342,6 +348,9 @@ class App(tk.Tk):
         self.keep_aspect = tk.BooleanVar(value=False)
         ttk.Checkbutton(bottom, text="원본 비율 유지 (박스 안에 맞춤)",
                         variable=self.keep_aspect).pack(side="left")
+        self.lock_ratio = tk.BooleanVar(value=True)
+        ttk.Checkbutton(bottom, text="가로세로 비율 잠금 (교체된 사진에 자동 적용)",
+                        variable=self.lock_ratio).pack(side="left", padx=(12, 0))
         ttk.Button(bottom, text="② 교체 실행", command=self.on_replace).pack(side="right")
         self.count_lbl = tk.StringVar(value="선택 0장")
         ttk.Label(bottom, textvariable=self.count_lbl).pack(side="right", padx=12)
@@ -560,12 +569,13 @@ class App(tk.Tk):
                 return
 
         keep = self.keep_aspect.get()
+        lock = self.lock_ratio.get()
         ok, fail = 0, []
         for i, t in enumerate(self.sequence):
             if not t.get("image"):
                 continue
             try:
-                self.ctrl.replace_picture(t, t["image"], keep_aspect=keep)
+                self.ctrl.replace_picture(t, t["image"], keep_aspect=keep, lock_ratio=lock)
                 ok += 1
             except Exception as e:
                 fail.append(f"{i + 1}번: {e}")
