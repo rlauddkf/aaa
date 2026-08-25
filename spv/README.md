@@ -4,7 +4,34 @@
 그 내용을 사람이 읽을 수 있게 설명해 주는 프로그램입니다.
 외부 라이브러리 없이 **파이썬 표준 라이브러리만으로** 동작합니다.
 
-## 사용법
+## Windows EXE 로 만들기 (더블클릭 실행 프로그램)
+
+`.SPV` 파일을 창에서 열어 그래프로 보고 CSV/HTML 로 내보내는 **GUI 버전**
+(`spv_analyzer_gui.py`)을 단일 `SPV분석기.exe` 로 만들 수 있습니다.
+
+> ⚠️ Windows `.exe` 는 **Windows PC 에서 빌드**해야 합니다.
+> (리눅스/맥에서 만든 실행파일은 Windows 에서 실행되지 않습니다.)
+
+### 방법 A — 원클릭 (권장)
+1. 이 `spv` 폴더 전체를 Windows PC 로 복사
+2. [python.org](https://www.python.org) 에서 Python 설치
+   (설치 화면에서 **"Add Python to PATH"** 체크)
+3. **`build_exe.bat` 더블클릭** → 잠시 후 `dist\SPV분석기.exe` 생성
+4. `dist\SPV분석기.exe` 더블클릭 → 프로그램 실행, [SPV 파일 열기] 클릭
+
+### 방법 B — 직접 명령
+```bat
+pip install pyinstaller
+pyinstaller --onefile --windowed --name "SPV분석기" ^
+  --add-data "spv_analyzer.py;." spv_analyzer_gui.py
+```
+
+빌드 없이 바로 실행하려면 (Python 만 있으면 됨):
+```bat
+python spv_analyzer_gui.py
+```
+
+## 명령줄(CLI) 사용법
 
 ```bash
 # 콘솔 요약 리포트

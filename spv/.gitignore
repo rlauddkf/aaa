@@ -1,2 +1,6 @@
 samples/*.csv
 samples/*.html
+build/
+dist/
+*.spec
+__pycache__/
