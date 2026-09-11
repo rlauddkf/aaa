@@ -1,2 +1,2 @@
-pyautogui>=0.9.54
-pyperclip>=1.8.2
+# Windows 전용 (Microsoft Word COM 연결)
+pywin32>=306
