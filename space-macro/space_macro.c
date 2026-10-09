@@ -3,8 +3,8 @@
  *
  * 직전(현재 활성) 창에 스페이스바 누름마다 아래 동작을 한 번씩 보낸다.
  *   스페이스바 1번째: 위 방향키 10번 -> 스페이스바 (끝, 대기)
- *   스페이스바 2번째: 아래 방향키 10번 -> 스페이스바 (끝)
- *   스페이스바 3번째부터: 일반 스페이스바 (매크로 완료)
+ *   스페이스바 2번째: 아래 방향키 10번 -> 스페이스바 (끝, 대기)
+ *   스페이스바 3번째: 다시 1번째 동작, 4번째: 2번째 동작 ... (번갈아 반복)
  * 매크로가 보낸 스페이스바로 매크로가 다시 실행되는 일은 없다.
  *
  * F8  : 처음부터 다시 (다음 스페이스바가 1번째 동작)
@@ -43,7 +43,7 @@ static HFONT g_font, g_fontBold;
 
 static HWND g_lastTarget;               /* 마지막으로 활성화됐던 다른 프로그램 창 */
 static volatile LONG g_busy;            /* 키 전송 중 여부 */
-static volatile LONG g_step;            /* 다음 동작: 0=위, 1=아래, 2=완료(일반 스페이스) */
+static volatile LONG g_step;            /* 다음 동작: 0=위, 1=아래 */
 static BOOL g_spaceDown;                /* 물리 스페이스바 눌림 상태 (자동반복 방지) */
 static volatile DWORD g_doneTick;       /* 마지막 동작이 끝난 시각 */
 
@@ -91,7 +91,7 @@ static DWORD WINAPI MacroThread(LPVOID param)
         SendKey(arrow, TRUE);
     SendKey(VK_SPACE, FALSE);
 
-    InterlockedExchange(&g_step, up ? 1 : 2);
+    InterlockedExchange(&g_step, up ? 1 : 0);
     Sleep(50); /* 마지막 스페이스바가 처리될 시간 */
     g_doneTick = GetTickCount();
     InterlockedExchange(&g_busy, 0);
@@ -130,7 +130,7 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
                 if (!down) g_spaceDown = FALSE;
                 return 1;
             }
-            if (down && g_step < 2) {
+            if (down) {
                 /* 동작 중이거나 방금 끝났으면 무시 (매크로가 보낸 스페이스의 잔여 입력 차단) */
                 if (g_busy || GetTickCount() - g_doneTick < COOLDOWN_MS)
                     return CallNextHookEx(g_kbHook, nCode, wParam, lParam);
@@ -168,13 +168,8 @@ static void Paint(HWND hwnd)
     SetBkMode(dc, TRANSPARENT);
 
     SelectObject(dc, g_fontBold);
-    if (g_step >= 2 && !g_busy) {
-        SetTextColor(dc, RGB(200, 60, 40));
-        lstrcpyW(line, L"● 완료 - 스페이스바 일반 입력  (F8: 처음부터)");
-    } else {
-        SetTextColor(dc, RGB(30, 140, 60));
-        lstrcpyW(line, L"● 매크로 대기  (F8: 처음부터)");
-    }
+    SetTextColor(dc, RGB(30, 140, 60));
+    lstrcpyW(line, L"● 매크로 대기  (F8: 처음부터)");
     SetRect(&rc, 12, y, 400, y + 22);
     DrawTextW(dc, line, -1, &rc, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
     y += 26;
@@ -183,8 +178,6 @@ static void Paint(HWND hwnd)
     SetTextColor(dc, RGB(20, 20, 20));
     if (g_busy)
         lstrcpyW(line, L"실행 중...");
-    else if (g_step >= 2)
-        lstrcpyW(line, L"다음 스페이스바:  일반 스페이스바");
     else
         wsprintfW(line, L"다음 스페이스바(%d/2):  %s %d번 + 스페이스",
                   (int)g_step + 1, g_step == 0 ? L"↑ 위" : L"↓ 아래", REPEAT_COUNT);
