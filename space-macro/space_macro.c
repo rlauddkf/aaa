@@ -1,13 +1,13 @@
 /*
  * SpaceMacro - 스페이스바 매크로
  *
- * 스페이스바를 한 번 누를 때마다 직전(현재 활성) 창에 동작을 딱 한 번 보내고 멈춘다.
+ * 직전(현재 활성) 창에 스페이스바 누름마다 아래 동작을 한 번씩 보낸다.
  *   스페이스바 1번째: 위 방향키 10번 -> 스페이스바 (끝, 대기)
- *   스페이스바 2번째: 아래 방향키 10번 -> 스페이스바 (끝, 대기)
- *   스페이스바 3번째: 다시 위 ... (누를 때만 동작)
+ *   스페이스바 2번째: 아래 방향키 10번 -> 스페이스바 (끝)
+ *   스페이스바 3번째부터: 일반 스페이스바 (매크로 완료)
  * 매크로가 보낸 스페이스바로 매크로가 다시 실행되는 일은 없다.
  *
- * F8  : 일시정지 / 재개 (일시정지 중에는 스페이스바가 평소처럼 입력됨)
+ * F8  : 처음부터 다시 (다음 스페이스바가 1번째 동작)
  * 종료: 창의 [종료] 버튼 또는 창 닫기
  *
  * 빌드 (MinGW-w64):
@@ -33,7 +33,7 @@
 #define WM_APP_TRIGGER (WM_APP + 1)
 #define WM_APP_UPDATE  (WM_APP + 2)
 
-#define ID_BTN_PAUSE   101
+#define ID_BTN_RESET   101
 #define ID_BTN_EXIT    102
 
 static HWND  g_wnd;
@@ -43,8 +43,7 @@ static HFONT g_font, g_fontBold;
 
 static HWND g_lastTarget;               /* 마지막으로 활성화됐던 다른 프로그램 창 */
 static volatile LONG g_busy;            /* 키 전송 중 여부 */
-static volatile LONG g_paused;          /* 일시정지 여부 */
-static volatile LONG g_nextUp = 1;      /* 다음 동작: 1=위, 0=아래 */
+static volatile LONG g_step;            /* 다음 동작: 0=위, 1=아래, 2=완료(일반 스페이스) */
 static BOOL g_spaceDown;                /* 물리 스페이스바 눌림 상태 (자동반복 방지) */
 static volatile DWORD g_doneTick;       /* 마지막 동작이 끝난 시각 */
 
@@ -78,7 +77,7 @@ static void SendKey(WORD vk, BOOL extended)
 static DWORD WINAPI MacroThread(LPVOID param)
 {
     int i;
-    BOOL up = g_nextUp != 0;
+    BOOL up = g_step == 0;
     WORD arrow = up ? VK_UP : VK_DOWN;
     (void)param;
 
@@ -92,7 +91,7 @@ static DWORD WINAPI MacroThread(LPVOID param)
         SendKey(arrow, TRUE);
     SendKey(VK_SPACE, FALSE);
 
-    InterlockedExchange(&g_nextUp, up ? 0 : 1);
+    InterlockedExchange(&g_step, up ? 1 : 2);
     Sleep(50); /* 마지막 스페이스바가 처리될 시간 */
     g_doneTick = GetTickCount();
     InterlockedExchange(&g_busy, 0);
@@ -121,27 +120,25 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
 
         if (kb->vkCode == VK_F8) {
             if (down)
-                PostMessageW(g_wnd, WM_COMMAND, ID_BTN_PAUSE, 0);
+                PostMessageW(g_wnd, WM_COMMAND, ID_BTN_RESET, 0);
             return 1;
         }
 
-        if (kb->vkCode == VK_SPACE && !g_paused) {
-            if (down) {
-                /* 동작 중이거나 방금 끝났으면 무시 (매크로가 보낸 스페이스의 잔여 입력 차단) */
-                if (!g_spaceDown &&
-                    (g_busy || GetTickCount() - g_doneTick < COOLDOWN_MS))
-                    return CallNextHookEx(g_kbHook, nCode, wParam, lParam);
-                if (!g_spaceDown && ModifierHeld()) /* Shift+Space(한/영) 등은 통과 */
-                    return CallNextHookEx(g_kbHook, nCode, wParam, lParam);
-                if (!g_spaceDown) {
-                    g_spaceDown = TRUE;
-                    PostMessageW(g_wnd, WM_APP_TRIGGER, 0, 0);
-                }
-                return 1; /* 원래 스페이스 입력은 막음 */
-            }
+        if (kb->vkCode == VK_SPACE) {
+            /* 매크로로 막은 스페이스바는 누르고 있는 동안(자동반복)과 뗄 때도 막음 */
             if (g_spaceDown) {
-                g_spaceDown = FALSE;
+                if (!down) g_spaceDown = FALSE;
                 return 1;
+            }
+            if (down && g_step < 2) {
+                /* 동작 중이거나 방금 끝났으면 무시 (매크로가 보낸 스페이스의 잔여 입력 차단) */
+                if (g_busy || GetTickCount() - g_doneTick < COOLDOWN_MS)
+                    return CallNextHookEx(g_kbHook, nCode, wParam, lParam);
+                if (ModifierHeld()) /* Shift+Space(한/영) 등은 통과 */
+                    return CallNextHookEx(g_kbHook, nCode, wParam, lParam);
+                g_spaceDown = TRUE;
+                PostMessageW(g_wnd, WM_APP_TRIGGER, 0, 0);
+                return 1; /* 원래 스페이스 입력은 막음 */
             }
         }
     }
@@ -171,12 +168,12 @@ static void Paint(HWND hwnd)
     SetBkMode(dc, TRANSPARENT);
 
     SelectObject(dc, g_fontBold);
-    if (g_paused) {
+    if (g_step >= 2 && !g_busy) {
         SetTextColor(dc, RGB(200, 60, 40));
-        lstrcpyW(line, L"● 일시정지됨  (F8: 재개)");
+        lstrcpyW(line, L"● 완료 - 스페이스바 일반 입력  (F8: 처음부터)");
     } else {
         SetTextColor(dc, RGB(30, 140, 60));
-        lstrcpyW(line, L"● 동작 중  (F8: 일시정지)");
+        lstrcpyW(line, L"● 매크로 대기  (F8: 처음부터)");
     }
     SetRect(&rc, 12, y, 400, y + 22);
     DrawTextW(dc, line, -1, &rc, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
@@ -186,9 +183,11 @@ static void Paint(HWND hwnd)
     SetTextColor(dc, RGB(20, 20, 20));
     if (g_busy)
         lstrcpyW(line, L"실행 중...");
+    else if (g_step >= 2)
+        lstrcpyW(line, L"다음 스페이스바:  일반 스페이스바");
     else
-        wsprintfW(line, L"대기 중 - 다음 스페이스바:  %s %d번 + 스페이스",
-                  g_nextUp ? L"↑ 위" : L"↓ 아래", REPEAT_COUNT);
+        wsprintfW(line, L"다음 스페이스바(%d/2):  %s %d번 + 스페이스",
+                  (int)g_step + 1, g_step == 0 ? L"↑ 위" : L"↓ 아래", REPEAT_COUNT);
     SetRect(&rc, 12, y, 400, y + 20);
     DrawTextW(dc, line, -1, &rc, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
     y += 22;
@@ -202,17 +201,12 @@ static void Paint(HWND hwnd)
     EndPaint(hwnd, &ps);
 }
 
-static void UpdatePauseButton(void)
-{
-    SetDlgItemTextW(g_wnd, ID_BTN_PAUSE, g_paused ? L"재개 (F8)" : L"일시정지 (F8)");
-}
-
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg) {
     case WM_CREATE: {
-        HWND b1 = CreateWindowW(L"BUTTON", L"일시정지 (F8)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                12, 92, 180, 30, hwnd, (HMENU)ID_BTN_PAUSE, NULL, NULL);
+        HWND b1 = CreateWindowW(L"BUTTON", L"처음부터 다시 (F8)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                12, 92, 180, 30, hwnd, (HMENU)ID_BTN_RESET, NULL, NULL);
         HWND b2 = CreateWindowW(L"BUTTON", L"종료", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                                 204, 92, 180, 30, hwnd, (HMENU)ID_BTN_EXIT, NULL, NULL);
         SendMessageW(b1, WM_SETFONT, (WPARAM)g_font, TRUE);
@@ -221,10 +215,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
-        case ID_BTN_PAUSE:
-            InterlockedExchange(&g_paused, g_paused ? 0 : 1);
-            g_spaceDown = FALSE;
-            UpdatePauseButton();
+        case ID_BTN_RESET:
+            if (!g_busy)
+                InterlockedExchange(&g_step, 0);
             InvalidateRect(hwnd, NULL, TRUE);
             return 0;
         case ID_BTN_EXIT:
