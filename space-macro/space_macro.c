@@ -1,10 +1,11 @@
 /*
  * SpaceMacro - 스페이스바 매크로
  *
- * 스페이스바를 누를 때마다 직전(현재 활성) 창에 아래 동작을 번갈아 보낸다.
- *   1회차: 위 방향키 10번 -> 스페이스바
- *   2회차: 아래 방향키 10번 -> 스페이스바
- *   (이후 반복)
+ * 스페이스바를 한 번 누를 때마다 직전(현재 활성) 창에 동작을 딱 한 번 보내고 멈춘다.
+ *   스페이스바 1번째: 위 방향키 10번 -> 스페이스바 (끝, 대기)
+ *   스페이스바 2번째: 아래 방향키 10번 -> 스페이스바 (끝, 대기)
+ *   스페이스바 3번째: 다시 위 ... (누를 때만 동작)
+ * 매크로가 보낸 스페이스바로 매크로가 다시 실행되는 일은 없다.
  *
  * F8  : 일시정지 / 재개 (일시정지 중에는 스페이스바가 평소처럼 입력됨)
  * 종료: 창의 [종료] 버튼 또는 창 닫기
@@ -25,6 +26,9 @@
 #define REPEAT_COUNT   10  /* 방향키 반복 횟수 */
 #define KEY_HOLD_MS    10  /* 키를 누르고 있는 시간 */
 #define KEY_GAP_MS     30  /* 키 입력 사이 간격 */
+#define COOLDOWN_MS    300 /* 동작 직후 스페이스바를 무시하는 시간 */
+
+#define MACRO_SIGNATURE ((ULONG_PTR)0x53504D43) /* 매크로가 보낸 키 표시 */
 
 #define WM_APP_TRIGGER (WM_APP + 1)
 #define WM_APP_UPDATE  (WM_APP + 2)
@@ -42,6 +46,7 @@ static volatile LONG g_busy;            /* 키 전송 중 여부 */
 static volatile LONG g_paused;          /* 일시정지 여부 */
 static volatile LONG g_nextUp = 1;      /* 다음 동작: 1=위, 0=아래 */
 static BOOL g_spaceDown;                /* 물리 스페이스바 눌림 상태 (자동반복 방지) */
+static volatile DWORD g_doneTick;       /* 마지막 동작이 끝난 시각 */
 
 static BOOL IsOwnWindow(HWND hwnd)
 {
@@ -59,6 +64,7 @@ static void SendKey(WORD vk, BOOL extended)
     in[0].ki.wVk = vk;
     in[0].ki.wScan = (WORD)MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
     in[0].ki.dwFlags = extended ? KEYEVENTF_EXTENDEDKEY : 0;
+    in[0].ki.dwExtraInfo = MACRO_SIGNATURE;
     SendInput(1, in, sizeof(INPUT));
     Sleep(KEY_HOLD_MS);
 
@@ -87,6 +93,8 @@ static DWORD WINAPI MacroThread(LPVOID param)
     SendKey(VK_SPACE, FALSE);
 
     InterlockedExchange(&g_nextUp, up ? 0 : 1);
+    Sleep(50); /* 마지막 스페이스바가 처리될 시간 */
+    g_doneTick = GetTickCount();
     InterlockedExchange(&g_busy, 0);
     PostMessageW(g_wnd, WM_APP_UPDATE, 0, 0);
     return 0;
@@ -107,8 +115,8 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
         const KBDLLHOOKSTRUCT *kb = (const KBDLLHOOKSTRUCT *)lParam;
         BOOL down = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN);
 
-        /* 프로그램이 직접 보낸 키는 그대로 통과 */
-        if (kb->flags & LLKHF_INJECTED)
+        /* 프로그램이 직접 보낸 키는 그대로 통과 (다시 매크로를 실행하지 않음) */
+        if ((kb->flags & LLKHF_INJECTED) || kb->dwExtraInfo == MACRO_SIGNATURE)
             return CallNextHookEx(g_kbHook, nCode, wParam, lParam);
 
         if (kb->vkCode == VK_F8) {
@@ -119,6 +127,10 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
 
         if (kb->vkCode == VK_SPACE && !g_paused) {
             if (down) {
+                /* 동작 중이거나 방금 끝났으면 무시 (매크로가 보낸 스페이스의 잔여 입력 차단) */
+                if (!g_spaceDown &&
+                    (g_busy || GetTickCount() - g_doneTick < COOLDOWN_MS))
+                    return CallNextHookEx(g_kbHook, nCode, wParam, lParam);
                 if (!g_spaceDown && ModifierHeld()) /* Shift+Space(한/영) 등은 통과 */
                     return CallNextHookEx(g_kbHook, nCode, wParam, lParam);
                 if (!g_spaceDown) {
@@ -172,8 +184,11 @@ static void Paint(HWND hwnd)
 
     SelectObject(dc, g_font);
     SetTextColor(dc, RGB(20, 20, 20));
-    wsprintfW(line, L"다음 스페이스바:  %s 방향키 %d번 + 스페이스",
-              g_nextUp ? L"↑ 위" : L"↓ 아래", REPEAT_COUNT);
+    if (g_busy)
+        lstrcpyW(line, L"실행 중...");
+    else
+        wsprintfW(line, L"대기 중 - 다음 스페이스바:  %s %d번 + 스페이스",
+                  g_nextUp ? L"↑ 위" : L"↓ 아래", REPEAT_COUNT);
     SetRect(&rc, 12, y, 400, y + 20);
     DrawTextW(dc, line, -1, &rc, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
     y += 22;
@@ -222,6 +237,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             HANDLE th = CreateThread(NULL, 0, MacroThread, NULL, 0, NULL);
             if (th) CloseHandle(th);
             else InterlockedExchange(&g_busy, 0);
+            InvalidateRect(hwnd, NULL, TRUE);
         }
         return 0;
     case WM_APP_UPDATE:
