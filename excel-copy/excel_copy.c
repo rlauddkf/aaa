@@ -23,8 +23,6 @@
 #endif
 #include <windows.h>
 
-#define KEY_GAP_MS     30  /* 키 입력 사이 간격 */
-
 #define MACRO_SIGNATURE ((ULONG_PTR)0x58434350) /* 매크로가 보낸 키 표시 */
 
 #define WM_APP_TRIGGER (WM_APP + 1)
@@ -67,6 +65,7 @@ static BOOL ActivateWindow(HWND hwnd)
 {
     HWND fg = GetForegroundWindow();
     DWORD fgThread, myThread = GetCurrentThreadId();
+    int i;
 
     if (fg == hwnd) return TRUE;
     if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
@@ -77,22 +76,24 @@ static BOOL ActivateWindow(HWND hwnd)
     SetForegroundWindow(hwnd);
     if (fgThread && fgThread != myThread) AttachThreadInput(myThread, fgThread, FALSE);
 
-    Sleep(150);
-    return GetForegroundWindow() == hwnd;
+    /* 창 전환이 끝나는 즉시 진행 (최대 300ms 대기) */
+    for (i = 0; i < 30 && GetForegroundWindow() != hwnd; i++)
+        Sleep(10);
+    if (GetForegroundWindow() != hwnd) return FALSE;
+    Sleep(30); /* 엑셀이 포커스를 받을 시간 */
+    return TRUE;
 }
 
-static void KeyEvent(WORD vk, BOOL up)
+static void AddKey(INPUT *in, int *n, WORD vk, BOOL up)
 {
-    INPUT in;
-    ZeroMemory(&in, sizeof(in));
-    in.type = INPUT_KEYBOARD;
-    in.ki.wVk = vk;
-    in.ki.wScan = (WORD)MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
-    if (vk == VK_DOWN) in.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
-    if (up) in.ki.dwFlags |= KEYEVENTF_KEYUP;
-    in.ki.dwExtraInfo = MACRO_SIGNATURE;
-    SendInput(1, &in, sizeof(INPUT));
-    Sleep(KEY_GAP_MS);
+    INPUT *k = &in[(*n)++];
+    ZeroMemory(k, sizeof(*k));
+    k->type = INPUT_KEYBOARD;
+    k->ki.wVk = vk;
+    k->ki.wScan = (WORD)MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
+    if (vk == VK_DOWN) k->ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+    if (up) k->ki.dwFlags |= KEYEVENTF_KEYUP;
+    k->ki.dwExtraInfo = MACRO_SIGNATURE;
 }
 
 /* 실제 키 전송은 별도 스레드에서 수행한다.
@@ -105,16 +106,18 @@ static DWORD WINAPI MacroThread(LPVOID param)
     if (!excel || !ActivateWindow(excel)) {
         InterlockedExchange(&g_result, 2);
     } else {
-        /* Ctrl+Shift+↓ */
-        KeyEvent(VK_CONTROL, FALSE);
-        KeyEvent(VK_SHIFT, FALSE);
-        KeyEvent(VK_DOWN, FALSE);
-        KeyEvent(VK_DOWN, TRUE);
-        KeyEvent(VK_SHIFT, TRUE);
-        /* Ctrl+C */
-        KeyEvent('C', FALSE);
-        KeyEvent('C', TRUE);
-        KeyEvent(VK_CONTROL, TRUE);
+        /* 모든 키를 한 번에 전송 (중간 대기 없음) */
+        INPUT in[8];
+        int n = 0;
+        AddKey(in, &n, VK_CONTROL, FALSE);  /* Ctrl+Shift+↓ */
+        AddKey(in, &n, VK_SHIFT, FALSE);
+        AddKey(in, &n, VK_DOWN, FALSE);
+        AddKey(in, &n, VK_DOWN, TRUE);
+        AddKey(in, &n, VK_SHIFT, TRUE);
+        AddKey(in, &n, 'C', FALSE);         /* Ctrl+C */
+        AddKey(in, &n, 'C', TRUE);
+        AddKey(in, &n, VK_CONTROL, TRUE);
+        SendInput(n, in, sizeof(INPUT));
         InterlockedExchange(&g_result, 1);
     }
 
