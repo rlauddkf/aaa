@@ -93,6 +93,13 @@ class PowerPointController:
         ps = self.pres.PageSetup
         return float(ps.SlideWidth), float(ps.SlideHeight)
 
+    def set_screen_updating(self, on):
+        """교체 중 화면 갱신 on/off (지원하지 않는 버전이면 조용히 무시)."""
+        try:
+            self.app.ScreenUpdating = MSO_TRUE if on else MSO_FALSE
+        except Exception:
+            pass
+
     @staticmethod
     def _is_picture(shape):
         try:
@@ -180,14 +187,18 @@ class PowerPointController:
         except Exception:
             pass
 
-        try:
-            new_id = int(new_shape.Id)
-        except Exception:
-            new_id = None
         old.Delete()
 
-        if old_z is not None and new_id is not None:
-            self._move_to_zorder(slide, new_id, old_z)
+        # z-순서(앞뒤 레이어) 복원: new_shape 참조를 그대로 유지한 채
+        # 필요한 만큼만 뒤로 보낸다 (매번 전체 도형을 다시 훑지 않아 훨씬 빠름).
+        if old_z is not None:
+            try:
+                safety = 0
+                while int(new_shape.ZOrderPosition) > old_z and safety < 500:
+                    new_shape.ZOrder(MSO_SEND_BACKWARD)
+                    safety += 1
+            except Exception:
+                pass
 
     @staticmethod
     def _fit_keep_aspect(shape, bx, by, bw, bh):
@@ -202,30 +213,6 @@ class PowerPointController:
             shape.Top = by + (bh - nh * s) / 2.0
         except Exception:
             pass
-
-    @staticmethod
-    def _move_to_zorder(slide, shape_id, target_z):
-        for _ in range(200):
-            shape = None
-            for s in slide.Shapes:
-                try:
-                    if int(s.Id) == shape_id:
-                        shape = s
-                        break
-                except Exception:
-                    continue
-            if shape is None:
-                return
-            try:
-                cur_z = int(shape.ZOrderPosition)
-            except Exception:
-                return
-            if cur_z <= target_z:
-                return
-            try:
-                shape.ZOrder(MSO_SEND_BACKWARD)
-            except Exception:
-                return
 
 
 # ===========================================================================
@@ -579,14 +566,21 @@ class App(tk.Tk):
         keep = self.keep_aspect.get()
         lock = self.lock_ratio.get()
         ok, fail = 0, []
-        for i, t in enumerate(self.sequence):
-            if not t.get("image"):
-                continue
-            try:
-                self.ctrl.replace_picture(t, t["image"], keep_aspect=keep, lock_ratio=lock)
-                ok += 1
-            except Exception as e:
-                fail.append(f"{i + 1}번: {e}")
+        self.status.set("교체 중...")
+        self.update_idletasks()
+        # 교체하는 동안 PowerPoint 화면 갱신을 끄면 훨씬 빠르다 (지원 안 하면 무시).
+        self.ctrl.set_screen_updating(False)
+        try:
+            for i, t in enumerate(self.sequence):
+                if not t.get("image"):
+                    continue
+                try:
+                    self.ctrl.replace_picture(t, t["image"], keep_aspect=keep, lock_ratio=lock)
+                    ok += 1
+                except Exception as e:
+                    fail.append(f"{i + 1}번: {e}")
+        finally:
+            self.ctrl.set_screen_updating(True)
 
         msg = f"완료: {ok}장 교체됨."
         if fail:
