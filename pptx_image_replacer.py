@@ -147,6 +147,13 @@ class PowerPointController:
         if old is None:
             raise RuntimeError("대상 사진을 찾을 수 없습니다 (이미 변경됨).")
 
+        # PowerPoint COM 은 슬래시(/) 경로나 상대경로에서 '지정한 파일이 없습니다'
+        # 오류를 내므로, 절대경로 + Windows 역슬래시(\)로 정규화한다.
+        img = os.path.abspath(os.path.expanduser(image_path))
+        if not os.path.exists(img):
+            raise RuntimeError(f"이미지 파일이 없습니다: {img}")
+        img = img.replace("/", "\\")
+
         left, top = float(old.Left), float(old.Top)
         width, height = float(old.Width), float(old.Height)
         rotation = float(old.Rotation)
@@ -155,9 +162,10 @@ class PowerPointController:
         except Exception:
             old_z = None
 
+        # 일부 pywin32 바인딩에서 키워드 인자가 제대로 매핑되지 않을 수 있어
+        # 위치 인자로 호출한다. (FileName, LinkToFile, SaveWithDocument, L, T, W, H)
         new_shape = slide.Shapes.AddPicture(
-            FileName=image_path, LinkToFile=MSO_FALSE, SaveWithDocument=MSO_TRUE,
-            Left=left, Top=top, Width=width, Height=height,
+            img, MSO_FALSE, MSO_TRUE, left, top, width, height,
         )
         if keep_aspect:
             self._fit_keep_aspect(new_shape, left, top, width, height)
