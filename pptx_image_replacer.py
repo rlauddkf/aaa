@@ -179,21 +179,54 @@ class PowerPointController:
         except Exception:
             old_z = None
 
-        # 일부 pywin32 바인딩에서 키워드 인자가 제대로 매핑되지 않을 수 있어
-        # 위치 인자로 호출한다. (FileName, LinkToFile, SaveWithDocument, L, T, W, H)
-        new_shape = slide.Shapes.AddPicture(
-            img, MSO_FALSE, MSO_TRUE, left, top, width, height,
-        )
-        if keep_aspect:
-            self._fit_keep_aspect(new_shape, left, top, width, height)
+        # 사용자가 지정한 회전은 '도형 회전 속성' 대신 이미지 픽셀 자체를 돌려서
+        # 반영한다. 그래야 미리보기(실제 돌아간 모습)와 똑같은 방향·비율로 들어간다.
+        rot = int(round(float(extra_rotation))) % 360
+        work_img = img
+        rotated_tmp = None
+        if rot and HAS_PIL:
+            try:
+                im = Image.open(img)
+                im = im.rotate(-rot, expand=True)   # PowerPoint/미리보기와 동일한 시계방향
+                if im.mode not in ("RGB", "RGBA"):
+                    im = im.convert("RGBA")
+                fd, rotated_tmp = tempfile.mkstemp(suffix=".png", prefix="pptrot_")
+                os.close(fd)
+                im.save(rotated_tmp, "PNG")
+                work_img = rotated_tmp
+            except Exception:
+                work_img, rotated_tmp, rot = img, None, 0  # 실패 시 회전 없이 진행
+
+        # 회전된 이미지(또는 비율 유지 옵션)는 원래 박스 안에 비율을 지켜 넣는다.
+        # 이때 네이티브 크기(-1,-1)로 넣은 뒤 박스에 맞춰야 비율이 유지된다.
+        fit = keep_aspect or bool(rot)
+        try:
+            if fit:
+                new_shape = slide.Shapes.AddPicture(
+                    work_img, MSO_FALSE, MSO_TRUE, left, top, -1, -1)
+                self._fit_keep_aspect(new_shape, left, top, width, height)
+            else:
+                new_shape = slide.Shapes.AddPicture(
+                    work_img, MSO_FALSE, MSO_TRUE, left, top, width, height)
+        finally:
+            if rotated_tmp:
+                # SaveWithDocument=True 로 이미 문서에 포함됐으므로 임시파일 삭제
+                try:
+                    os.remove(rotated_tmp)
+                except Exception:
+                    pass
+
         # 교체된 사진에 가로세로 비율 잠금을 자동 적용 (이후 크기 조절 시 찌그러짐 방지)
         if lock_ratio:
             try:
                 new_shape.LockAspectRatio = MSO_TRUE
             except Exception:
                 pass
+        # 원래 도형이 기울어져 있었다면 그 기울기만 유지 (사용자 회전은 픽셀로 이미 반영).
+        # 단, Pillow 가 없어 픽셀 회전을 못 한 경우엔 도형 회전으로 대체한다.
+        frame_rot = rot if (rot and not rotated_tmp) else 0
         try:
-            new_shape.Rotation = (rotation + float(extra_rotation)) % 360
+            new_shape.Rotation = (rotation + frame_rot) % 360
         except Exception:
             pass
 
