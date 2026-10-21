@@ -149,7 +149,8 @@ class PowerPointController:
                 continue
         return slide, None
 
-    def replace_picture(self, target, image_path, keep_aspect=False, lock_ratio=True):
+    def replace_picture(self, target, image_path, keep_aspect=False, lock_ratio=True,
+                        extra_rotation=0.0):
         slide, old = self.find_shape(target["slide_index"], target["shape_id"])
         if old is None:
             raise RuntimeError("대상 사진을 찾을 수 없습니다 (이미 변경됨).")
@@ -183,7 +184,7 @@ class PowerPointController:
             except Exception:
                 pass
         try:
-            new_shape.Rotation = rotation
+            new_shape.Rotation = (rotation + float(extra_rotation)) % 360
         except Exception:
             pass
 
@@ -527,6 +528,10 @@ class App(tk.Tk):
             if t.get("image") and HAS_PIL:
                 try:
                     im = Image.open(t["image"])
+                    rot = int(t.get("rotate", 0)) % 360
+                    if rot:
+                        # PowerPoint 회전은 시계방향이므로 미리보기도 시계방향으로
+                        im = im.rotate(-rot, expand=True)
                     im.thumbnail((64, 48))
                     ph = ImageTk.PhotoImage(im)
                     self._row_thumbs.append(ph)
@@ -540,10 +545,23 @@ class App(tk.Tk):
             ttk.Label(mid, text=f"[슬라이드 {t['slide_index']}]", foreground="#888").pack(anchor="w")
             ttk.Label(mid, text=name, wraplength=140).pack(anchor="w")
 
-            ttk.Button(row, text="파일 선택",
-                       command=lambda tt=t: self._pick_file(tt)).pack(side="right")
+            # 오른쪽 조작: 파일 선택 + 회전
+            ctrl = ttk.Frame(row)
+            ctrl.pack(side="right")
+            ttk.Button(ctrl, text="파일 선택", width=8,
+                       command=lambda tt=t: self._pick_file(tt)).pack(anchor="e")
+            rot_box = ttk.Frame(ctrl)
+            rot_box.pack(anchor="e", pady=(3, 0))
+            ttk.Button(rot_box, text="⟳ 90°", width=6,
+                       command=lambda tt=t: self._rotate_item(tt, 90)).pack(side="left")
+            ttk.Label(rot_box, text=f"{int(t.get('rotate', 0)) % 360}°",
+                      width=5, anchor="center").pack(side="left")
 
         self.count_lbl.set(f"선택 {len(self.sequence)}장")
+
+    def _rotate_item(self, target, step):
+        target["rotate"] = (int(target.get("rotate", 0)) + step) % 360
+        self._rebuild_rows()
 
     def _pick_file(self, target):
         path = filedialog.askopenfilename(title="새 이미지 선택", filetypes=IMAGE_TYPES)
@@ -575,7 +593,9 @@ class App(tk.Tk):
                 if not t.get("image"):
                     continue
                 try:
-                    self.ctrl.replace_picture(t, t["image"], keep_aspect=keep, lock_ratio=lock)
+                    self.ctrl.replace_picture(
+                        t, t["image"], keep_aspect=keep, lock_ratio=lock,
+                        extra_rotation=int(t.get("rotate", 0)))
                     ok += 1
                 except Exception as e:
                     fail.append(f"{i + 1}번: {e}")
