@@ -114,22 +114,31 @@ class PowerPointController:
             return False
         return False
 
-    def pictures_on_slide(self, slide_index):
-        """해당 슬라이드의 사진 목록 (위치/크기는 points 단위)."""
+    def pictures_on_slide(self, slide_index, include_shapes=False):
+        """해당 슬라이드의 대상 개체 목록 (위치/크기는 points 단위).
+
+        include_shapes=False 이면 사진만, True 이면 크기가 있는 모든 도형까지 포함.
+        """
         result = []
         slide = self.pres.Slides.Item(slide_index)
         for shape in slide.Shapes:
-            if not self._is_picture(shape):
+            is_pic = self._is_picture(shape)
+            if not is_pic and not include_shapes:
                 continue
             try:
+                w = float(shape.Width)
+                h = float(shape.Height)
+                if w <= 0 or h <= 0:        # 선/커넥터 등 크기가 없는 개체는 제외
+                    continue
                 result.append({
                     "slide_index": slide_index,
                     "shape_id": int(shape.Id),
                     "name": str(shape.Name),
                     "left": float(shape.Left),
                     "top": float(shape.Top),
-                    "width": float(shape.Width),
-                    "height": float(shape.Height),
+                    "width": w,
+                    "height": h,
+                    "is_pic": bool(is_pic),
                 })
             except Exception:
                 continue
@@ -268,6 +277,11 @@ class App(tk.Tk):
         ttk.Button(zoom, text="＋", width=3, command=self.zoom_in).pack(side="left")
         ttk.Button(zoom, text="화면 맞춤", command=self.zoom_fit).pack(side="left", padx=(4, 0))
 
+        # 도형도 대상에 포함할지
+        self.include_shapes = tk.BooleanVar(value=True)
+        ttk.Checkbutton(top, text="도형 포함", variable=self.include_shapes,
+                        command=self.render_slide).pack(side="left", padx=(8, 0))
+
         self.status = tk.StringVar(value="PowerPoint 를 연결해주세요.")
         ttk.Label(top, textvariable=self.status, foreground="#0060c0").pack(side="left", padx=12)
 
@@ -278,7 +292,7 @@ class App(tk.Tk):
         # 좌: 슬라이드 캔버스 (스크롤 + 줌 + 드래그 이동)
         left = ttk.LabelFrame(
             body,
-            text="슬라이드 — 사진을 순서대로 클릭 (다시 클릭=취소) · 우클릭 드래그=이동 · Ctrl+휠=확대/축소",
+            text="슬라이드 — 사진(파랑)·도형(초록)을 순서대로 클릭 (다시 클릭=취소) · 우클릭 드래그=이동 · Ctrl+휠=확대/축소",
             padding=6)
         left.pack(side="left", fill="both", expand=True)
 
@@ -445,7 +459,8 @@ class App(tk.Tk):
                 (p["top"] + p["height"]) * self.scale,
                 p,
             )
-            for p in self.ctrl.pictures_on_slide(self.slide_index)
+            for p in self.ctrl.pictures_on_slide(
+                self.slide_index, include_shapes=self.include_shapes.get())
         ]
         self._draw()
 
@@ -457,7 +472,9 @@ class App(tk.Tk):
         for (x0, y0, x1, y1, target) in self.overlays:
             order = self._order_of(target)
             if order is None:
-                self.canvas.create_rectangle(x0, y0, x1, y1, outline="#4da3ff",
+                # 사진=파랑, 도형=초록 점선으로 구분
+                color = "#4da3ff" if target.get("is_pic", True) else "#35c46a"
+                self.canvas.create_rectangle(x0, y0, x1, y1, outline=color,
                                              width=2, dash=(4, 3))
             else:
                 self.canvas.create_rectangle(x0, y0, x1, y1, outline=self.BADGE_COLORS, width=3)
@@ -542,7 +559,9 @@ class App(tk.Tk):
             mid = ttk.Frame(row)
             mid.pack(side="left", fill="x", expand=True)
             name = os.path.basename(t["image"]) if t.get("image") else "(새 파일 없음)"
-            ttk.Label(mid, text=f"[슬라이드 {t['slide_index']}]", foreground="#888").pack(anchor="w")
+            kind = "사진" if t.get("is_pic", True) else "도형"
+            ttk.Label(mid, text=f"[슬라이드 {t['slide_index']} · {kind}]",
+                      foreground="#888").pack(anchor="w")
             ttk.Label(mid, text=name, wraplength=140).pack(anchor="w")
 
             # 오른쪽 조작: 파일 선택 + 회전
