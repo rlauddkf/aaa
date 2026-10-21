@@ -1,7 +1,7 @@
 /*
  * ExcelCopy - 엑셀 아래로 선택 후 복사 매크로
  *
- * Ctrl+Shift 를 눌렀다 떼면 (다른 키 없이) 엑셀 창에 아래 동작을 보낸다.
+ * Ctrl+Shift 가 함께 눌리는 즉시 엑셀 창에 아래 동작을 보낸다.
  *   Ctrl+Shift+↓  (현재 셀부터 아래로 데이터 끝까지 선택)
  *   Ctrl+C        (선택 영역 복사)
  *
@@ -25,14 +25,14 @@
 
 #define MACRO_SIGNATURE ((ULONG_PTR)0x58434350) /* 매크로가 보낸 키 표시 */
 
-#define WM_APP_TRIGGER (WM_APP + 1)
 #define WM_APP_UPDATE  (WM_APP + 2)
 
 #define ID_BTN_PAUSE   101
 #define ID_BTN_EXIT    102
 
 static HWND  g_wnd;
-static HHOOK g_kbHook, g_mouseHook;
+static HHOOK g_kbHook;
+static HANDLE g_triggerEvent;           /* 작업 스레드를 깨우는 신호 */
 static HWINEVENTHOOK g_fgHook;
 static HFONT g_font, g_fontBold;
 
@@ -41,9 +41,9 @@ static volatile LONG g_busy;            /* 키 전송 중 여부 */
 static volatile LONG g_paused;          /* 일시정지 여부 */
 static volatile LONG g_result;          /* 0=대기, 1=복사 완료, 2=엑셀 없음 */
 
-/* Ctrl+Shift 단독 입력 감지 상태 */
+/* Ctrl+Shift 입력 감지 상태 */
 static BOOL g_ctrlDown, g_shiftDown;
-static BOOL g_armed;                    /* Ctrl+Shift가 함께 눌렸고 다른 키가 없었음 */
+static BOOL g_fired;                    /* 이번 Ctrl+Shift 누름에서 이미 실행했음 (자동반복 방지) */
 
 static BOOL IsExcelWindow(HWND hwnd)
 {
@@ -96,17 +96,16 @@ static void AddKey(INPUT *in, int *n, WORD vk, BOOL up)
     k->ki.dwExtraInfo = MACRO_SIGNATURE;
 }
 
-/* 실제 키 전송은 별도 스레드에서 수행한다.
- * (키보드 후크가 있는 메인 스레드를 막으면 시스템 전체 입력이 느려진다) */
-static DWORD WINAPI MacroThread(LPVOID param)
+static void RunMacro(void)
 {
     HWND excel = FindExcel();
-    (void)param;
 
     if (!excel || !ActivateWindow(excel)) {
         InterlockedExchange(&g_result, 2);
     } else {
-        /* 모든 키를 한 번에 전송 (중간 대기 없음) */
+        /* 모든 키를 한 번에 전송 (중간 대기 없음).
+         * 사용자가 Ctrl+Shift를 누르고 있는 상태이므로 복사 전에 Shift를 떼고,
+         * 끝나면 Ctrl도 떼어 키가 눌린 채로 남지 않게 한다. */
         INPUT in[8];
         int n = 0;
         AddKey(in, &n, VK_CONTROL, FALSE);  /* Ctrl+Shift+↓ */
@@ -123,6 +122,17 @@ static DWORD WINAPI MacroThread(LPVOID param)
 
     InterlockedExchange(&g_busy, 0);
     PostMessageW(g_wnd, WM_APP_UPDATE, 0, 0);
+}
+
+/* 실제 키 전송은 미리 띄워 둔 작업 스레드에서 수행한다.
+ * (키보드 후크가 있는 메인 스레드를 막으면 시스템 전체 입력이 느려진다) */
+static DWORD WINAPI MacroThread(LPVOID param)
+{
+    (void)param;
+    for (;;) {
+        WaitForSingleObject(g_triggerEvent, INFINITE);
+        RunMacro();
+    }
     return 0;
 }
 
@@ -143,35 +153,23 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
             return 1;
         }
 
-        if (vk == VK_LCONTROL || vk == VK_RCONTROL || vk == VK_CONTROL) {
+        if (vk == VK_LCONTROL || vk == VK_RCONTROL || vk == VK_CONTROL)
             g_ctrlDown = down;
-        } else if (vk == VK_LSHIFT || vk == VK_RSHIFT || vk == VK_SHIFT) {
+        else if (vk == VK_LSHIFT || vk == VK_RSHIFT || vk == VK_SHIFT)
             g_shiftDown = down;
-        } else if (down) {
-            g_armed = FALSE; /* Ctrl+Shift+다른키 조합이면 취소 */
-        }
+        else
+            return CallNextHookEx(g_kbHook, nCode, wParam, lParam);
 
-        if (down && g_ctrlDown && g_shiftDown)
-            g_armed = TRUE;
-
-        /* Ctrl, Shift 둘 다 떼었을 때 실행 */
-        if (!down && !g_ctrlDown && !g_shiftDown && g_armed) {
-            g_armed = FALSE;
-            if (!g_paused)
-                PostMessageW(g_wnd, WM_APP_TRIGGER, 0, 0);
+        if (!g_ctrlDown || !g_shiftDown) {
+            g_fired = FALSE; /* 둘 중 하나라도 떼면 다시 실행 가능 */
+        } else if (!g_fired) {
+            /* Ctrl, Shift 둘 다 눌린 순간 바로 실행 */
+            g_fired = TRUE;
+            if (!g_paused && InterlockedCompareExchange(&g_busy, 1, 0) == 0)
+                SetEvent(g_triggerEvent);
         }
     }
     return CallNextHookEx(g_kbHook, nCode, wParam, lParam);
-}
-
-/* Ctrl+Shift+클릭은 매크로로 보지 않음 */
-static LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam)
-{
-    if (nCode == HC_ACTION &&
-        (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN ||
-         wParam == WM_MBUTTONDOWN || wParam == WM_MOUSEWHEEL))
-        g_armed = FALSE;
-    return CallNextHookEx(g_mouseHook, nCode, wParam, lParam);
 }
 
 static void CALLBACK ForegroundProc(HWINEVENTHOOK hook, DWORD event, HWND hwnd,
@@ -203,7 +201,7 @@ static void Paint(HWND hwnd)
         lstrcpyW(line, L"● 일시정지됨  (F9: 재개)");
     } else {
         SetTextColor(dc, RGB(30, 140, 60));
-        lstrcpyW(line, L"● 대기 중 - Ctrl+Shift 눌렀다 떼기  (F9: 일시정지)");
+        lstrcpyW(line, L"● 대기 중 - Ctrl+Shift 누르면 실행  (F9: 일시정지)");
     }
     SetRect(&rc, 12, y, 420, y + 22);
     DrawTextW(dc, line, -1, &rc, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
@@ -258,14 +256,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
         break;
-    case WM_APP_TRIGGER:
-        if (InterlockedCompareExchange(&g_busy, 1, 0) == 0) {
-            HANDLE th = CreateThread(NULL, 0, MacroThread, NULL, 0, NULL);
-            if (th) CloseHandle(th);
-            else InterlockedExchange(&g_busy, 0);
-            InvalidateRect(hwnd, NULL, TRUE);
-        }
-        return 0;
     case WM_APP_UPDATE:
     case WM_TIMER:
         InvalidateRect(hwnd, NULL, TRUE);
@@ -325,12 +315,20 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show)
                             NULL, NULL, inst, NULL);
     if (!g_wnd) return 1;
 
+    g_triggerEvent = CreateEventW(NULL, FALSE, FALSE, NULL);
+    if (g_triggerEvent) {
+        HANDLE th = CreateThread(NULL, 0, MacroThread, NULL, 0, NULL);
+        if (th) {
+            SetThreadPriority(th, THREAD_PRIORITY_HIGHEST);
+            CloseHandle(th);
+        }
+    }
+
     g_kbHook = SetWindowsHookExW(WH_KEYBOARD_LL, KeyboardProc, inst, 0);
     if (!g_kbHook) {
         MessageBoxW(NULL, L"키보드 후크 설치에 실패했습니다.", L"ExcelCopy", MB_OK | MB_ICONERROR);
         return 1;
     }
-    g_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, MouseProc, inst, 0);
     g_fgHook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, NULL,
                                ForegroundProc, 0, 0, WINEVENT_OUTOFCONTEXT);
 
@@ -344,7 +342,6 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show)
     }
 
     if (g_fgHook) UnhookWinEvent(g_fgHook);
-    if (g_mouseHook) UnhookWindowsHookEx(g_mouseHook);
     UnhookWindowsHookEx(g_kbHook);
     DeleteObject(g_font);
     DeleteObject(g_fontBold);
