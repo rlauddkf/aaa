@@ -5,9 +5,13 @@
  *   1. 열려 있는 파워포인트 중 이름이 "프레젠테이션1" 인 파일의 창으로 전환해서
  *      현재 선택된 부분을 복사 (Ctrl+C)
  *   2. 이름이 "OPT" 인 파일의 창으로 전환해서 현재 위치에 붙여넣기 (Ctrl+V)
- *   3. 붙여넣은 부분에 [채우기 없음] + [모든 테두리] 적용
- *      - 표: 셀 채우기 없음, 셀마다 위/아래/왼쪽/오른쪽 테두리 (검은색 1pt)
- *      - 표가 아닌 도형: 채우기 없음, 윤곽선 (검은색 1pt)
+ *   3. 리본 [테이블 디자인] 탭의 버튼을 직접 누름
+ *        음영 ▼ → 채우기 없음
+ *        테두리 ▼ → 모든 테두리
+ *      버튼은 UI 자동화로 이름을 찾아서 누른다 (한국어/영어 오피스 모두).
+ *      버튼을 찾지 못하면 같은 서식을 파워포인트에 직접 명령해서 적용한다.
+ *
+ * 실행할 때마다 exe와 같은 폴더에 PptCopy_log.txt 로 단계별 기록을 남긴다.
  *
  * 파워포인트에 직접 연결(COM)해서 파일을 이름으로 찾고 서식을 적용한다.
  * 복사/붙여넣기는 직접 누르는 것과 똑같이 Ctrl+C / Ctrl+V 로 한다.
@@ -20,6 +24,7 @@
  *       ppt_copy.c -o PptCopy.exe -lole32 -loleaut32 -luuid
  */
 #define WIN32_LEAN_AND_MEAN
+#define COBJMACROS
 #ifndef UNICODE
 #define UNICODE
 #endif
@@ -30,6 +35,7 @@
 #include <ole2.h>
 #include <oleauto.h>
 #include <stdarg.h>
+#include <uiautomation.h>
 
 #define SRC_NAME L"프레젠테이션1"   /* 복사할 파워포인트 이름 */
 #define DST_NAME L"OPT"            /* 붙여넣을 파워포인트 이름 */
@@ -59,7 +65,8 @@ static HFONT g_font, g_fontBold;
 
 static volatile LONG g_busy;
 static volatile LONG g_result;
-static volatile LONG g_formatted;       /* 최근 실행에서 서식을 적용한 표/도형 수 */
+static volatile LONG g_formatted;       /* 최근 실행에서 직접 서식을 적용한 표/도형 수 */
+static volatile LONG g_uiPressed;       /* 리본 버튼을 누른 결과 (1=채우기 없음, 2=모든 테두리) */
 static BOOL g_plusDown;                 /* 숫자패드 + 눌림 상태 (자동반복 방지) */
 
 /* ---------------------------------------------------------------- COM 도우미 */
@@ -410,6 +417,343 @@ static void AddKey(INPUT *in, int *n, WORD vk, BOOL up)
     k->ki.dwExtraInfo = MACRO_SIGNATURE;
 }
 
+/* ---------------------------------------------------------------- 기록 */
+
+static HANDLE g_log = INVALID_HANDLE_VALUE;
+static DWORD g_logStart;
+
+static void LogOpen(void)
+{
+    WCHAR path[MAX_PATH];
+    WCHAR *slash, *c;
+    DWORD w;
+
+    GetModuleFileNameW(NULL, path, MAX_PATH);
+    slash = path;
+    for (c = path; *c; c++) if (*c == L'\\') slash = c + 1;
+    lstrcpyW(slash, L"PptCopy_log.txt");
+    g_log = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS,
+                        FILE_ATTRIBUTE_NORMAL, NULL);
+    if (g_log != INVALID_HANDLE_VALUE)
+        WriteFile(g_log, "\xEF\xBB\xBF", 3, &w, NULL); /* UTF-8 BOM (메모장 한글 표시용) */
+    g_logStart = GetTickCount();
+}
+
+static void LogClose(void)
+{
+    if (g_log != INVALID_HANDLE_VALUE) CloseHandle(g_log);
+    g_log = INVALID_HANDLE_VALUE;
+}
+
+static void Log(const WCHAR *fmt, ...)
+{
+    WCHAR buf[600];
+    char utf8[1800];
+    va_list ap;
+    int len, n;
+    DWORD w;
+
+    if (g_log == INVALID_HANDLE_VALUE) return;
+    len = wsprintfW(buf, L"[%6lu ms] ", GetTickCount() - g_logStart);
+    va_start(ap, fmt);
+    wvsprintfW(buf + len, fmt, ap);
+    va_end(ap);
+    lstrcatW(buf, L"\r\n");
+    n = WideCharToMultiByte(CP_UTF8, 0, buf, -1, utf8, sizeof(utf8), NULL, NULL);
+    if (n > 1) WriteFile(g_log, utf8, n - 1, &w, NULL);
+}
+
+/* ---------------------------------------------------------------- 리본 버튼 누르기 (UI 자동화) */
+
+/* 버튼/메뉴 이름 (한국어, 영어). NULL 로 끝남 */
+static const WCHAR *const NAMES_TAB[]     = { L"테이블 디자인", L"표 디자인", L"Table Design", NULL };
+static const WCHAR *const NAMES_TAB_OLD[] = { L"디자인", L"Design", NULL }; /* 2016 이전: 표 도구 > 디자인 */
+static const WCHAR *const NAMES_SHADING[] = { L"음영", L"Shading", NULL };
+static const WCHAR *const NAMES_NOFILL[]  = { L"채우기 없음", L"No Fill", NULL };
+static const WCHAR *const NAMES_BORDERS[] = { L"테두리", L"Borders", NULL };
+static const WCHAR *const NAMES_ALLBORD[] = { L"모든 테두리", L"All Borders", NULL };
+
+static IUIAutomation *g_uia;
+
+static IUIAutomationCondition *IntCond(PROPERTYID prop, LONG value)
+{
+    IUIAutomationCondition *c = NULL;
+    VARIANT v;
+    VariantInit(&v);
+    v.vt = VT_I4;
+    v.lVal = value;
+    IUIAutomation_CreatePropertyCondition(g_uia, prop, v, &c);
+    return c;
+}
+
+#define CLICKABLE (-1) /* 버튼/분할 버튼/메뉴 항목/목록 항목 (슬라이드 안의 글자와 구분) */
+
+static IUIAutomationCondition *ClickableCond(void)
+{
+    static const LONG types[] = { 50000 /* Button */, 50031 /* SplitButton */,
+                                  50011 /* MenuItem */, 50007 /* ListItem */,
+                                  50002 /* CheckBox */ };
+    IUIAutomationCondition *cond = NULL;
+    int i;
+    for (i = 0; i < (int)(sizeof(types) / sizeof(types[0])); i++) {
+        IUIAutomationCondition *c = IntCond(UIA_ControlTypePropertyId, types[i]), *both = NULL;
+        if (!c) continue;
+        if (!cond) { cond = c; continue; }
+        IUIAutomation_CreateOrCondition(g_uia, cond, c, &both);
+        IUIAutomationCondition_Release(cond);
+        IUIAutomationCondition_Release(c);
+        cond = both;
+    }
+    return cond;
+}
+
+/* 이름 목록 중 하나와 같은 요소 조건 (+ 컨트롤 종류, 0이면 무시, CLICKABLE 이면 버튼류) */
+static IUIAutomationCondition *NameCond(const WCHAR *const *names, LONG controlType)
+{
+    IUIAutomationCondition *cond = NULL;
+    int i;
+
+    for (i = 0; names[i]; i++) {
+        IUIAutomationCondition *c = NULL, *both = NULL;
+        VARIANT v;
+        VariantInit(&v);
+        v.vt = VT_BSTR;
+        v.bstrVal = SysAllocString(names[i]);
+        IUIAutomation_CreatePropertyCondition(g_uia, UIA_NamePropertyId, v, &c);
+        VariantClear(&v);
+        if (!c) continue;
+        if (!cond) {
+            cond = c;
+        } else {
+            IUIAutomation_CreateOrCondition(g_uia, cond, c, &both);
+            IUIAutomationCondition_Release(cond);
+            IUIAutomationCondition_Release(c);
+            cond = both;
+        }
+    }
+    if (cond && controlType) {
+        IUIAutomationCondition *both = NULL;
+        IUIAutomationCondition *t = controlType == CLICKABLE ? ClickableCond()
+                                                             : IntCond(UIA_ControlTypePropertyId, controlType);
+        if (t) {
+            IUIAutomation_CreateAndCondition(g_uia, cond, t, &both);
+            IUIAutomationCondition_Release(t);
+            IUIAutomationCondition_Release(cond);
+            cond = both;
+        }
+    }
+    return cond;
+}
+
+static IUIAutomationElement *FindIn(IUIAutomationElement *root, const WCHAR *const *names,
+                                    LONG controlType)
+{
+    IUIAutomationElement *el = NULL;
+    IUIAutomationCondition *cond;
+
+    if (!root) return NULL;
+    cond = NameCond(names, controlType);
+    if (!cond) return NULL;
+    IUIAutomationElement_FindFirst(root, TreeScope_Descendants, cond, &el);
+    IUIAutomationCondition_Release(cond);
+    return el;
+}
+
+/* 드롭다운(▼)을 펼칠 수 있는 버튼 우선으로 찾기.
+ * 분할 버튼의 왼쪽 부분을 누르면 메뉴 대신 마지막에 쓴 서식이 바로 적용되므로 피한다. */
+static IUIAutomationElement *FindDropdown(IUIAutomationElement *root, const WCHAR *const *names)
+{
+    IUIAutomationElement *el = NULL;
+    IUIAutomationCondition *cond = NameCond(names, CLICKABLE), *exp = NULL, *both = NULL;
+    VARIANT v;
+
+    if (!root || !cond) return NULL;
+    VariantInit(&v);
+    v.vt = VT_BOOL;
+    v.boolVal = VARIANT_TRUE;
+    IUIAutomation_CreatePropertyCondition(g_uia, UIA_IsExpandCollapsePatternAvailablePropertyId, v, &exp);
+    if (exp) {
+        IUIAutomation_CreateAndCondition(g_uia, cond, exp, &both);
+        IUIAutomationCondition_Release(exp);
+    }
+    if (both) {
+        IUIAutomationElement_FindFirst(root, TreeScope_Descendants, both, &el);
+        IUIAutomationCondition_Release(both);
+    }
+    if (!el)
+        IUIAutomationElement_FindFirst(root, TreeScope_Descendants, cond, &el);
+    IUIAutomationCondition_Release(cond);
+    return el;
+}
+
+/* 파워포인트 프로세스의 모든 최상위 창(본 창 + 펼친 메뉴 창)에서 찾기 */
+static IUIAutomationElement *FindInProcess(DWORD pid, const WCHAR *const *names, LONG controlType)
+{
+    IUIAutomationElement *root = NULL, *found = NULL;
+    IUIAutomationElementArray *wins = NULL;
+    IUIAutomationCondition *pidCond = IntCond(UIA_ProcessIdPropertyId, (LONG)pid);
+    int i, count = 0;
+
+    IUIAutomation_GetRootElement(g_uia, &root);
+    if (root && pidCond)
+        IUIAutomationElement_FindAll(root, TreeScope_Children, pidCond, &wins);
+    if (wins) IUIAutomationElementArray_get_Length(wins, &count);
+    for (i = 0; i < count && !found; i++) {
+        IUIAutomationElement *w = NULL;
+        IUIAutomationElementArray_GetElement(wins, i, &w);
+        found = FindIn(w, names, controlType);
+        if (w) IUIAutomationElement_Release(w);
+    }
+    if (wins) IUIAutomationElementArray_Release(wins);
+    if (pidCond) IUIAutomationCondition_Release(pidCond);
+    if (root) IUIAutomationElement_Release(root);
+    return found;
+}
+
+static void ClickCenter(IUIAutomationElement *el, BOOL rightEdge)
+{
+    RECT r;
+    INPUT in[2];
+    POINT old;
+
+    if (FAILED(IUIAutomationElement_get_CurrentBoundingRectangle(el, &r)) || r.right <= r.left)
+        return;
+    GetCursorPos(&old);
+    /* 분할 버튼은 오른쪽(▼) 끝을 눌러야 메뉴가 열림 */
+    SetCursorPos(rightEdge ? r.right - 4 : (r.left + r.right) / 2, (r.top + r.bottom) / 2);
+    ZeroMemory(in, sizeof(in));
+    in[0].type = in[1].type = INPUT_MOUSE;
+    in[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+    in[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
+    in[0].mi.dwExtraInfo = in[1].mi.dwExtraInfo = MACRO_SIGNATURE;
+    SendInput(2, in, sizeof(INPUT));
+    Sleep(30);
+    SetCursorPos(old.x, old.y);
+}
+
+/* 요소 누르기. expand=TRUE 면 드롭다운 펼치기를 먼저 시도 */
+static BOOL Press(IUIAutomationElement *el, BOOL expand)
+{
+    IUnknown *pat = NULL;
+
+    if (expand &&
+        SUCCEEDED(IUIAutomationElement_GetCurrentPatternAs(el, UIA_ExpandCollapsePatternId,
+                  &IID_IUIAutomationExpandCollapsePattern, (void **)&pat)) && pat) {
+        HRESULT hr = IUIAutomationExpandCollapsePattern_Expand((IUIAutomationExpandCollapsePattern *)pat);
+        IUnknown_Release(pat);
+        if (SUCCEEDED(hr)) return TRUE;
+    }
+    pat = NULL;
+    if (SUCCEEDED(IUIAutomationElement_GetCurrentPatternAs(el, UIA_InvokePatternId,
+                  &IID_IUIAutomationInvokePattern, (void **)&pat)) && pat) {
+        HRESULT hr = IUIAutomationInvokePattern_Invoke((IUIAutomationInvokePattern *)pat);
+        IUnknown_Release(pat);
+        if (SUCCEEDED(hr)) return TRUE;
+    }
+    pat = NULL;
+    if (SUCCEEDED(IUIAutomationElement_GetCurrentPatternAs(el, UIA_SelectionItemPatternId,
+                  &IID_IUIAutomationSelectionItemPattern, (void **)&pat)) && pat) {
+        HRESULT hr = IUIAutomationSelectionItemPattern_Select((IUIAutomationSelectionItemPattern *)pat);
+        IUnknown_Release(pat);
+        if (SUCCEEDED(hr)) return TRUE;
+    }
+    pat = NULL;
+    if (SUCCEEDED(IUIAutomationElement_GetCurrentPatternAs(el, UIA_LegacyIAccessiblePatternId,
+                  &IID_IUIAutomationLegacyIAccessiblePattern, (void **)&pat)) && pat) {
+        HRESULT hr = IUIAutomationLegacyIAccessiblePattern_DoDefaultAction(
+                         (IUIAutomationLegacyIAccessiblePattern *)pat);
+        IUnknown_Release(pat);
+        if (SUCCEEDED(hr)) return TRUE;
+    }
+    ClickCenter(el, expand);
+    return TRUE;
+}
+
+/* 리본에서 테이블 디자인 탭을 열고 음영/테두리 버튼이 보이게 함 */
+static IUIAutomationElement *FindRibbonButton(HWND hwnd, const WCHAR *const *names)
+{
+    IUIAutomationElement *win = NULL, *btn = NULL, *tab;
+    int i;
+
+    IUIAutomation_ElementFromHandle(g_uia, hwnd, &win);
+    if (!win) return NULL;
+
+    btn = FindDropdown(win, names);
+    if (!btn) {
+        tab = FindIn(win, NAMES_TAB, UIA_TabItemControlTypeId);
+        if (tab) {
+            Log(L"  리본: 테이블 디자인 탭 선택");
+            Press(tab, FALSE);
+            IUIAutomationElement_Release(tab);
+            for (i = 0; i < 20 && !btn; i++) { Sleep(25); btn = FindDropdown(win, names); }
+        }
+    }
+    if (!btn) {
+        /* 예전 버전: '디자인' 탭이 두 개(일반, 표 도구)면 뒤쪽이 표 도구 */
+        IUIAutomationElementArray *tabs = NULL;
+        IUIAutomationCondition *cond = NameCond(NAMES_TAB_OLD, UIA_TabItemControlTypeId);
+        int count = 0;
+        if (cond) {
+            IUIAutomationElement_FindAll(win, TreeScope_Descendants, cond, &tabs);
+            IUIAutomationCondition_Release(cond);
+        }
+        if (tabs) IUIAutomationElementArray_get_Length(tabs, &count);
+        if (count > 0) {
+            IUIAutomationElement *last = NULL;
+            IUIAutomationElementArray_GetElement(tabs, count - 1, &last);
+            if (last) {
+                Log(L"  리본: 디자인 탭 선택 (표 도구)");
+                Press(last, FALSE);
+                IUIAutomationElement_Release(last);
+                for (i = 0; i < 20 && !btn; i++) { Sleep(25); btn = FindDropdown(win, names); }
+            }
+        }
+        if (tabs) IUIAutomationElementArray_Release(tabs);
+    }
+    IUIAutomationElement_Release(win);
+    return btn;
+}
+
+/* 리본의 드롭다운 버튼을 펼치고 메뉴 항목을 누름 (예: 음영 → 채우기 없음) */
+static BOOL PressRibbonMenu(HWND hwnd, const WCHAR *const *button, const WCHAR *const *item)
+{
+    IUIAutomationElement *btn, *menuItem = NULL;
+    DWORD pid = 0;
+    int i;
+
+    if (!g_uia) return FALSE;
+    GetWindowThreadProcessId(hwnd, &pid);
+
+    btn = FindRibbonButton(hwnd, button);
+    if (!btn) {
+        Log(L"  리본: '%s' 버튼을 찾지 못함", button[0]);
+        return FALSE;
+    }
+    Press(btn, TRUE);
+    IUIAutomationElement_Release(btn);
+
+    for (i = 0; i < 40 && !menuItem; i++) { /* 메뉴가 열릴 때까지 최대 약 1초 */
+        Sleep(25);
+        menuItem = FindInProcess(pid, item, CLICKABLE);
+    }
+    if (!menuItem) {
+        Log(L"  리본: '%s' 메뉴 항목을 찾지 못함", item[0]);
+        {
+            INPUT in[2];
+            int n = 0;
+            AddKey(in, &n, VK_ESCAPE, FALSE); /* 열린 메뉴 닫기 */
+            AddKey(in, &n, VK_ESCAPE, TRUE);
+            SendInput(n, in, sizeof(INPUT));
+        }
+        return FALSE;
+    }
+    Press(menuItem, FALSE);
+    IUIAutomationElement_Release(menuItem);
+    WaitIdle(hwnd);
+    Log(L"  리본: %s → %s 누름", button[0], item[0]);
+    return TRUE;
+}
+
 /* ---------------------------------------------------------------- 매크로 */
 
 static void SendCtrlKey(WORD key)
@@ -433,11 +777,14 @@ static LONG RunMacro(void)
 
     InterlockedExchange(&g_formatted, 0);
 
+    InterlockedExchange(&g_uiPressed, 0);
     app = ConnectPpt();
+    Log(L"시작: 파워포인트 연결 %s", app ? L"성공" : L"실패");
     if (!app) return RES_NO_PPT;
 
     src = FindPresentation(app, SRC_NAME);
     dst = FindPresentation(app, DST_NAME);
+    Log(L"'%s' %s, '%s' %s", SRC_NAME, src ? L"찾음" : L"없음", DST_NAME, dst ? L"찾음" : L"없음");
     if (!src) { res = RES_NO_SRC; goto done; }
     if (!dst) { res = RES_NO_DST; goto done; }
 
@@ -462,9 +809,19 @@ static LONG RunMacro(void)
     Sleep(50);
     WaitIdle(dstHwnd);
 
-    /* 3. 붙여넣은 부분에 채우기 없음 + 모든 테두리 */
-    if (FormatSelection(dstWin) == 0)
-        res = RES_NOTHING_PASTED;
+    Log(L"붙여넣기 완료");
+
+    /* 3. 리본 버튼 누르기: 음영 → 채우기 없음, 테두리 → 모든 테두리 */
+    {
+        BOOL fill = PressRibbonMenu(dstHwnd, NAMES_SHADING, NAMES_NOFILL);
+        BOOL border = PressRibbonMenu(dstHwnd, NAMES_BORDERS, NAMES_ALLBORD);
+        InterlockedExchange(&g_uiPressed, (fill ? 1 : 0) + (border ? 2 : 0));
+        if (!fill || !border) {
+            /* 버튼을 못 누른 경우 같은 서식을 직접 적용 */
+            Log(L"버튼을 누르지 못해 서식을 직접 적용");
+            if (FormatSelection(dstWin) == 0) res = RES_NOTHING_PASTED;
+        }
+    }
 
 done:
     Release(sel);
@@ -480,9 +837,14 @@ static DWORD WINAPI MacroThread(LPVOID param)
 {
     (void)param;
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    CoCreateInstance(&CLSID_CUIAutomation, NULL, CLSCTX_INPROC_SERVER, &IID_IUIAutomation,
+                     (void **)&g_uia);
     for (;;) {
         WaitForSingleObject(g_triggerEvent, INFINITE);
+        LogOpen();
         InterlockedExchange(&g_result, RunMacro());
+        Log(L"끝: 결과 코드 = %d, 리본 버튼 = %d", (int)g_result, (int)g_uiPressed);
+        LogClose();
         InterlockedExchange(&g_busy, 0);
         PostMessageW(g_wnd, WM_APP_UPDATE, 0, 0);
     }
@@ -539,7 +901,7 @@ static void Paint(HWND hwnd)
 {
     static const WCHAR *results[RES_MAX] = {
         L"프레젠테이션1에서 선택 → Ctrl + 숫자패드 +",
-        L"최근 결과:  붙여넣기 + 채우기 없음 + 모든 테두리 완료",
+        L"최근 결과:  붙여넣기 → 채우기 없음 → 모든 테두리 완료",
         L"최근 결과:  파워포인트에 연결하지 못했습니다",
         L"최근 결과:  '" SRC_NAME L"' 파일이 열려 있지 않습니다",
         L"최근 결과:  '" DST_NAME L"' 파일이 열려 있지 않습니다",
@@ -571,7 +933,10 @@ static void Paint(HWND hwnd)
     if (res < 0 || res >= RES_MAX) res = RES_NONE;
     DrawLine(dc, &y, results[res]);
     if (res == RES_DONE) {
-        wsprintfW(line, L"서식 적용:  표/도형 %d개", (int)g_formatted);
+        if (g_uiPressed == 3)
+            lstrcpyW(line, L"리본 버튼:  채우기 없음, 모든 테두리 누름");
+        else
+            wsprintfW(line, L"리본 버튼을 찾지 못해 직접 적용함 (표/도형 %d개)", (int)g_formatted);
         DrawLine(dc, &y, line);
     } else {
         DrawLine(dc, &y, L"복사:  " SRC_NAME L"  →  붙여넣기:  " DST_NAME);
@@ -626,6 +991,15 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show)
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         MessageBoxW(NULL, L"PptCopy가 이미 실행 중입니다.", L"PptCopy", MB_OK | MB_ICONINFORMATION);
         return 0;
+    }
+
+    /* 화면 배율(DPI)과 관계없이 버튼 위치 좌표가 정확하도록 */
+    {
+        typedef BOOL (WINAPI *SetCtxFn)(HANDLE);
+        SetCtxFn setCtx = (SetCtxFn)(void *)GetProcAddress(GetModuleHandleW(L"user32.dll"),
+                                                           "SetProcessDpiAwarenessContext");
+        if (!setCtx || !setCtx((HANDLE)-4)) /* PER_MONITOR_AWARE_V2 */
+            SetProcessDPIAware();
     }
 
     g_font = CreateFontW(-15, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0,
