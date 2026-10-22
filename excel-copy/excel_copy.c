@@ -101,12 +101,23 @@ static HWND FindPpt(void)
     return FindWindowW(L"PPTFrameClass", NULL); /* 화면 맨 위의 파워포인트 창 */
 }
 
-/* 대상 프로그램이 지금까지 받은 입력을 모두 처리할 때까지 기다림 */
+/* 대상 프로그램이 지금까지 받은 입력을 모두 처리할 때까지 기다림.
+ * 프로그램이 바쁘면 응답이 늦으므로, 연속 2번 바로 응답할 때까지 확인한다.
+ * (한 번만 확인하면 붙여넣기·슬라이드 전환 도중에 응답해서 너무 일찍 넘어갈 수 있음) */
 static void WaitIdle(HWND hwnd)
 {
     DWORD_PTR r;
-    Sleep(15); /* 보낸 키가 대상 프로그램의 입력 큐에 들어갈 시간 */
-    SendMessageTimeoutW(hwnd, WM_NULL, 0, 0, SMTO_NORMAL, 5000, &r);
+    DWORD t;
+    int calm = 0, i;
+
+    for (i = 0; i < 300 && calm < 2; i++) { /* 최대 약 5초 */
+        Sleep(15);
+        t = GetTickCount();
+        if (!SendMessageTimeoutW(hwnd, WM_NULL, 0, 0, SMTO_NORMAL, 5000, &r))
+            break;
+        if (GetTickCount() - t < 20) calm++;
+        else calm = 0;
+    }
 }
 
 static BOOL ActivateWindow(HWND hwnd)
@@ -217,16 +228,22 @@ static void ExcelMove(HWND excel, int cols)
 /* 파워포인트: 선택 해제 → 다음 슬라이드 → 기록해 둔 위치 클릭 */
 static void PptNextPage(HWND ppt)
 {
-    INPUT in[6];
+    INPUT in[8];
     POINT old;
     int n = 0;
 
-    AddTap(in, &n, VK_ESCAPE);  /* 표/텍스트 편집 종료 */
-    AddTap(in, &n, VK_ESCAPE);  /* 선택 해제 */
+    /* 셀 편집 → 셀 선택 → 표 선택 → 선택 없음 (남는 Esc는 아무 영향 없음) */
+    AddTap(in, &n, VK_ESCAPE);
+    AddTap(in, &n, VK_ESCAPE);
+    AddTap(in, &n, VK_ESCAPE);
+    SendInput(n, in, sizeof(INPUT));
+    WaitIdle(ppt);
+
+    n = 0;
     AddTap(in, &n, VK_NEXT);    /* PageDown: 다음 슬라이드 */
     SendInput(n, in, sizeof(INPUT));
     WaitIdle(ppt);
-    Sleep(30);
+    Sleep(50);                  /* 새 슬라이드가 화면에 그려질 시간 */
     WaitIdle(ppt);
 
     GetCursorPos(&old);
@@ -532,8 +549,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show)
         return 0;
     }
 
-    /* 화면 배율(DPI)과 관계없이 클릭 좌표가 정확하도록 */
-    SetProcessDPIAware();
+    /* 화면 배율(DPI)과 관계없이 클릭 좌표가 정확하도록 (모니터별 배율이 달라도) */
+    {
+        typedef BOOL (WINAPI *SetCtxFn)(HANDLE);
+        SetCtxFn setCtx = (SetCtxFn)(void *)GetProcAddress(GetModuleHandleW(L"user32.dll"),
+                                                           "SetProcessDpiAwarenessContext");
+        if (!setCtx || !setCtx((HANDLE)-4)) /* PER_MONITOR_AWARE_V2 */
+            SetProcessDPIAware();
+    }
 
     fg = GetForegroundWindow();
     if (IsExcelWindow(fg)) g_lastExcel = fg;
