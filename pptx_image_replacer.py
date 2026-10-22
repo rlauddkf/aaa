@@ -29,7 +29,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 try:
-    from PIL import Image, ImageTk
+    from PIL import Image, ImageTk, ImageOps
     HAS_PIL = True
 except Exception:
     HAS_PIL = False
@@ -180,19 +180,26 @@ class PowerPointController:
             old_z = None
 
         # 사용자가 지정한 회전은 '도형 회전 속성' 대신 이미지 픽셀 자체를 돌려서
-        # 반영한다. 그래야 미리보기(실제 돌아간 모습)와 똑같은 방향·비율로 들어간다.
+        # 반영한다. 그래야 미리보기(실제 돌아간 모습)와 똑같은 방향으로 들어간다.
         rot = int(round(float(extra_rotation))) % 360
         work_img = img
         rotated_tmp = None
         if rot and HAS_PIL:
             try:
                 im = Image.open(img)
+                im = ImageOps.exif_transpose(im)    # EXIF 방향 먼저 보정 (미리보기와 동일)
                 im = im.rotate(-rot, expand=True)   # PowerPoint/미리보기와 동일한 시계방향
-                if im.mode not in ("RGB", "RGBA"):
+                has_alpha = im.mode in ("RGBA", "LA", "P")
+                if has_alpha:
                     im = im.convert("RGBA")
-                fd, rotated_tmp = tempfile.mkstemp(suffix=".png", prefix="pptrot_")
-                os.close(fd)
-                im.save(rotated_tmp, "PNG")
+                    fd, rotated_tmp = tempfile.mkstemp(suffix=".png", prefix="pptrot_")
+                    os.close(fd)
+                    im.save(rotated_tmp, "PNG")
+                else:
+                    im = im.convert("RGB")
+                    fd, rotated_tmp = tempfile.mkstemp(suffix=".jpg", prefix="pptrot_")
+                    os.close(fd)
+                    im.save(rotated_tmp, "JPEG", quality=95)
                 work_img = rotated_tmp
             except Exception:
                 work_img, rotated_tmp, rot = img, None, 0  # 실패 시 회전 없이 진행
@@ -222,11 +229,18 @@ class PowerPointController:
                 new_shape.LockAspectRatio = MSO_TRUE
             except Exception:
                 pass
-        # 원래 도형이 기울어져 있었다면 그 기울기만 유지 (사용자 회전은 픽셀로 이미 반영).
-        # 단, Pillow 가 없어 픽셀 회전을 못 한 경우엔 도형 회전으로 대체한다.
-        frame_rot = rot if (rot and not rotated_tmp) else 0
+        # 회전 처리:
+        #  - 픽셀로 회전한 경우: 미리보기와 '그대로' 맞추기 위해 프레임 회전 0 (원래 기울기도 더하지 않음)
+        #  - Pillow 가 없어 픽셀 회전을 못 한 경우: 원래 기울기 + 사용자 회전을 프레임 회전으로 대체
+        #  - 회전이 없는 경우: 원래 도형의 기울기만 유지
+        if rotated_tmp:
+            final_rot = 0.0
+        elif rot:
+            final_rot = (rotation + rot) % 360
+        else:
+            final_rot = rotation % 360
         try:
-            new_shape.Rotation = (rotation + frame_rot) % 360
+            new_shape.Rotation = final_rot
         except Exception:
             pass
 
@@ -578,6 +592,7 @@ class App(tk.Tk):
             if t.get("image") and HAS_PIL:
                 try:
                     im = Image.open(t["image"])
+                    im = ImageOps.exif_transpose(im)   # 삽입과 동일하게 EXIF 방향 보정
                     rot = int(t.get("rotate", 0)) % 360
                     if rot:
                         # PowerPoint 회전은 시계방향이므로 미리보기도 시계방향으로
