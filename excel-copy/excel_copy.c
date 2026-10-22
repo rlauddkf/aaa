@@ -10,7 +10,7 @@
  *
  * [다음 페이지 준비] 한 페이지 작업이 끝날 때마다 (마지막 페이지 제외)
  *   - 파워포인트: Esc Esc → PageDown (다음 슬라이드) → 처음에 클릭했던 위치 클릭
- *   - 엑셀:       이번 페이지 시작 셀로 돌아가서 → 6번 (다음 시작 셀)
+ *   - 엑셀:       이번 페이지 시작 셀로 돌아가서 → 7번 (다음 시작 셀)
  *
  * 전체: 한 페이지 작업을 PAGE_COUNT(3)번 = 작업 → 준비 → 작업 → 준비 → 작업
  *
@@ -40,7 +40,7 @@
 #define PPT_RIGHT_COUNT   1   /* 붙여넣기 후 파워포인트에서 → 횟수 */
 #define EXCEL_RIGHT_COUNT 19  /* 엑셀로 돌아와서 → 횟수 */
 #define PAGE_COUNT        3   /* 페이지(슬라이드) 반복 횟수 */
-#define NEXT_PAGE_OFFSET  6   /* 다음 페이지 작업 때 엑셀 시작 셀을 오른쪽으로 옮길 칸 수 */
+#define NEXT_PAGE_OFFSET  7   /* 다음 페이지 작업 때 엑셀 시작 셀을 오른쪽으로 옮길 칸 수 */
 
 #define MACRO_SIGNATURE ((ULONG_PTR)0x58434350) /* 매크로가 보낸 키 표시 */
 
