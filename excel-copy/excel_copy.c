@@ -1,10 +1,20 @@
 /*
  * ExcelCopy - 엑셀 → 파워포인트 반복 복사/붙여넣기 매크로
  *
- * Ctrl+Shift 가 함께 눌리는 즉시 아래 동작을 LOOP_COUNT(3)번 반복한다.
+ * Ctrl+Shift 가 함께 눌리는 즉시 실행한다.
+ *
+ * [한 페이지 작업] LOOP_COUNT(3)회 반복
  *   1. 엑셀:       Ctrl+Shift+↓ (아래로 데이터 끝까지 선택) → Ctrl+C (복사)
  *   2. 파워포인트: 창 전환 → Ctrl+V (붙여넣기) → → 1번
- *   3. 엑셀:       창 전환 → → 19번 (마지막 회차는 생략, 파워포인트에서 끝남)
+ *   3. 엑셀:       창 전환 → → 19번 (마지막 회차는 생략)
+ *
+ * [다음 페이지 준비] 한 페이지 작업이 끝날 때마다 (마지막 페이지 제외)
+ *   - 파워포인트: Esc Esc → PageDown (다음 슬라이드) → 처음에 클릭했던 위치 클릭
+ *   - 엑셀:       이번 페이지 시작 셀로 돌아가서 → 6번 (다음 시작 셀)
+ *
+ * 전체: 한 페이지 작업을 PAGE_COUNT(3)번 = 작업 → 준비 → 작업 → 준비 → 작업
+ *
+ * 시작 전에 파워포인트에서 붙여넣을 위치를 클릭해 두면 그 위치가 기록된다.
  *
  * 각 단계는 고정 대기 대신 "복사 완료(클립보드 변경)", "창 전환 완료",
  * "프로그램이 입력 처리를 마침"을 확인하는 즉시 다음으로 넘어간다.
@@ -29,6 +39,8 @@
 #define LOOP_COUNT        3   /* 전체 반복 횟수 */
 #define PPT_RIGHT_COUNT   1   /* 붙여넣기 후 파워포인트에서 → 횟수 */
 #define EXCEL_RIGHT_COUNT 19  /* 엑셀로 돌아와서 → 횟수 */
+#define PAGE_COUNT        3   /* 페이지(슬라이드) 반복 횟수 */
+#define NEXT_PAGE_OFFSET  6   /* 다음 페이지 작업 때 엑셀 시작 셀을 오른쪽으로 옮길 칸 수 */
 
 #define MACRO_SIGNATURE ((ULONG_PTR)0x58434350) /* 매크로가 보낸 키 표시 */
 
@@ -38,10 +50,11 @@
 #define ID_BTN_EXIT    102
 
 /* 실행 결과 */
-enum { RES_NONE, RES_DONE, RES_NO_EXCEL, RES_NO_PPT, RES_SWITCH_FAIL, RES_COPY_FAIL, RES_ABORTED };
+enum { RES_NONE, RES_DONE, RES_NO_EXCEL, RES_NO_PPT, RES_SWITCH_FAIL, RES_COPY_FAIL, RES_ABORTED,
+       RES_NO_PPT_POS };
 
 static HWND  g_wnd;
-static HHOOK g_kbHook;
+static HHOOK g_kbHook, g_mouseHook;
 static HANDLE g_triggerEvent;           /* 작업 스레드를 깨우는 신호 */
 static HWINEVENTHOOK g_fgHook;
 static HFONT g_font, g_fontBold;
@@ -53,6 +66,9 @@ static volatile LONG g_abort;           /* Esc로 중지 요청 */
 static volatile LONG g_paused;          /* 일시정지 여부 */
 static volatile LONG g_result;          /* 최근 실행 결과 (RES_*) */
 static volatile LONG g_round;           /* 현재 반복 회차 (1~LOOP_COUNT) */
+static volatile LONG g_page;            /* 현재 페이지 (1~PAGE_COUNT) */
+static POINT g_pptClick;                /* 사용자가 파워포인트에서 마지막으로 클릭한 위치 */
+static volatile LONG g_hasPptClick;
 
 /* Ctrl+Shift 입력 감지 상태 */
 static BOOL g_ctrlDown, g_shiftDown;
@@ -184,35 +200,61 @@ static void PptPaste(HWND ppt)
     WaitIdle(ppt);
 }
 
-/* 엑셀: → EXCEL_RIGHT_COUNT번 */
-static void ExcelMoveRight(HWND excel)
+/* 엑셀: cols 칸만큼 이동 (양수: →, 음수: ←) */
+static void ExcelMove(HWND excel, int cols)
 {
-    INPUT in[EXCEL_RIGHT_COUNT * 2];
-    int n = 0, i;
+    INPUT in[2 * 64];
+    WORD vk = cols >= 0 ? VK_RIGHT : VK_LEFT;
+    int n = 0, i, count = cols >= 0 ? cols : -cols;
 
-    for (i = 0; i < EXCEL_RIGHT_COUNT; i++)
-        AddTap(in, &n, VK_RIGHT);
-    SendInput(n, in, sizeof(INPUT));
+    if (count > 64) count = 64;
+    for (i = 0; i < count; i++)
+        AddTap(in, &n, vk);
+    if (n) SendInput(n, in, sizeof(INPUT));
     WaitIdle(excel);
 }
 
-static void SetRound(int r)
+/* 파워포인트: 선택 해제 → 다음 슬라이드 → 기록해 둔 위치 클릭 */
+static void PptNextPage(HWND ppt)
 {
+    INPUT in[6];
+    POINT old;
+    int n = 0;
+
+    AddTap(in, &n, VK_ESCAPE);  /* 표/텍스트 편집 종료 */
+    AddTap(in, &n, VK_ESCAPE);  /* 선택 해제 */
+    AddTap(in, &n, VK_NEXT);    /* PageDown: 다음 슬라이드 */
+    SendInput(n, in, sizeof(INPUT));
+    WaitIdle(ppt);
+    Sleep(30);
+    WaitIdle(ppt);
+
+    GetCursorPos(&old);
+    SetCursorPos(g_pptClick.x, g_pptClick.y);
+    ZeroMemory(in, sizeof(INPUT) * 2);
+    in[0].type = in[1].type = INPUT_MOUSE;
+    in[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+    in[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
+    in[0].mi.dwExtraInfo = in[1].mi.dwExtraInfo = MACRO_SIGNATURE;
+    SendInput(2, in, sizeof(INPUT));
+    WaitIdle(ppt);
+    SetCursorPos(old.x, old.y);
+}
+
+static void SetProgress(int page, int r)
+{
+    InterlockedExchange(&g_page, page);
     InterlockedExchange(&g_round, r);
     PostMessageW(g_wnd, WM_APP_UPDATE, 0, 0);
 }
 
-static LONG RunMacro(void)
+/* 한 페이지 작업: 복사 → 붙여넣기를 LOOP_COUNT번 (파워포인트 창에서 끝남) */
+static LONG RunPage(HWND excel, HWND ppt, int page)
 {
-    HWND excel = FindExcel();
-    HWND ppt = FindPpt();
     int r;
 
-    if (!excel) return RES_NO_EXCEL;
-    if (!ppt) return RES_NO_PPT;
-
     for (r = 1; r <= LOOP_COUNT; r++) {
-        SetRound(r);
+        SetProgress(page, r);
 
         if (g_abort) return RES_ABORTED;
         if (!ActivateWindow(excel)) return RES_SWITCH_FAIL;
@@ -226,7 +268,36 @@ static LONG RunMacro(void)
 
         if (g_abort) return RES_ABORTED;
         if (!ActivateWindow(excel)) return RES_SWITCH_FAIL;
-        ExcelMoveRight(excel);
+        ExcelMove(excel, EXCEL_RIGHT_COUNT);
+    }
+    return RES_DONE;
+}
+
+static LONG RunMacro(void)
+{
+    HWND excel = FindExcel();
+    HWND ppt = FindPpt();
+    LONG res;
+    int page;
+
+    if (!excel) return RES_NO_EXCEL;
+    if (!ppt) return RES_NO_PPT;
+    if (PAGE_COUNT > 1 && !g_hasPptClick) return RES_NO_PPT_POS;
+
+    for (page = 1; page <= PAGE_COUNT; page++) {
+        res = RunPage(excel, ppt, page);
+        if (res != RES_DONE) return res;
+
+        if (page == PAGE_COUNT) break; /* 마지막 페이지는 다음 페이지 준비 생략 */
+
+        /* 다음 페이지 준비 (지금 파워포인트 창이 활성 상태) */
+        if (g_abort) return RES_ABORTED;
+        PptNextPage(ppt);
+
+        if (g_abort) return RES_ABORTED;
+        if (!ActivateWindow(excel)) return RES_SWITCH_FAIL;
+        /* 이번 페이지 시작 셀로 돌아간 뒤 NEXT_PAGE_OFFSET칸 오른쪽 */
+        ExcelMove(excel, NEXT_PAGE_OFFSET - EXCEL_RIGHT_COUNT * (LOOP_COUNT - 1));
     }
     return RES_DONE;
 }
@@ -240,7 +311,7 @@ static DWORD WINAPI MacroThread(LPVOID param)
         WaitForSingleObject(g_triggerEvent, INFINITE);
         InterlockedExchange(&g_abort, 0);
         InterlockedExchange(&g_result, RunMacro());
-        InterlockedExchange(&g_round, 0);
+        SetProgress(0, 0);
         InterlockedExchange(&g_busy, 0);
         PostMessageW(g_wnd, WM_APP_UPDATE, 0, 0);
     }
@@ -298,6 +369,23 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
     return CallNextHookEx(g_kbHook, nCode, wParam, lParam);
 }
 
+/* 사용자가 파워포인트 창 안을 클릭하면 그 위치를 기록 (다음 페이지에서 같은 위치를 클릭) */
+static LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam)
+{
+    if (nCode == HC_ACTION && wParam == WM_LBUTTONDOWN && !g_busy) {
+        const MSLLHOOKSTRUCT *ms = (const MSLLHOOKSTRUCT *)lParam;
+        if (!(ms->flags & LLMHF_INJECTED) && ms->dwExtraInfo != MACRO_SIGNATURE) {
+            HWND root = GetAncestor(WindowFromPoint(ms->pt), GA_ROOT);
+            if (IsPptWindow(root)) {
+                g_pptClick = ms->pt;
+                InterlockedExchange(&g_hasPptClick, 1);
+                PostMessageW(g_wnd, WM_APP_UPDATE, 0, 0);
+            }
+        }
+    }
+    return CallNextHookEx(g_mouseHook, nCode, wParam, lParam);
+}
+
 static void CALLBACK ForegroundProc(HWINEVENTHOOK hook, DWORD event, HWND hwnd,
                                     LONG idObject, LONG idChild,
                                     DWORD thread, DWORD time)
@@ -323,13 +411,14 @@ static void DrawLine(HDC dc, int *y, const WCHAR *text)
 static void Paint(HWND hwnd)
 {
     static const WCHAR *results[] = {
-        L"동작:  복사 → PPT 붙여넣기 → 엑셀 →19번 ×3회 (마지막 →19 생략)",
-        L"최근 결과:  3회 반복 완료",
+        L"동작:  복사/붙여넣기 3회 × 3페이지",
+        L"최근 결과:  3페이지 모두 완료",
         L"최근 결과:  엑셀 창을 찾지 못했습니다",
         L"최근 결과:  파워포인트 창을 찾지 못했습니다",
         L"최근 결과:  창 전환에 실패했습니다",
         L"최근 결과:  엑셀 복사에 실패했습니다",
         L"최근 결과:  Esc로 중지했습니다",
+        L"최근 결과:  PPT에서 붙여넣을 위치를 먼저 클릭하세요",
     };
     PAINTSTRUCT ps;
     HDC dc = BeginPaint(hwnd, &ps);
@@ -347,7 +436,8 @@ static void Paint(HWND hwnd)
         lstrcpyW(line, L"● 일시정지됨  (F9: 재개)");
     } else if (g_busy) {
         SetTextColor(dc, RGB(30, 90, 200));
-        wsprintfW(line, L"● 실행 중 %d/%d  (Esc: 중지)", (int)g_round, LOOP_COUNT);
+        wsprintfW(line, L"● 실행 중  페이지 %d/%d · 회차 %d/%d  (Esc: 중지)",
+                  (int)g_page, PAGE_COUNT, (int)g_round, LOOP_COUNT);
     } else {
         SetTextColor(dc, RGB(30, 140, 60));
         lstrcpyW(line, L"● 대기 중 - Ctrl+Shift 누르면 실행  (F9: 일시정지)");
@@ -357,7 +447,7 @@ static void Paint(HWND hwnd)
 
     SelectObject(dc, g_font);
     SetTextColor(dc, RGB(20, 20, 20));
-    if (res < 0 || res > RES_ABORTED) res = RES_NONE;
+    if (res < 0 || res > RES_NO_PPT_POS) res = RES_NONE;
     DrawLine(dc, &y, results[res]);
 
     title[0] = 0;
@@ -372,6 +462,12 @@ static void Paint(HWND hwnd)
     wsprintfW(line, L"파워포인트:  %s", w ? (title[0] ? title : L"PowerPoint") : L"(없음)");
     DrawLine(dc, &y, line);
 
+    if (g_hasPptClick)
+        wsprintfW(line, L"PPT 클릭 위치:  기록됨 (%d, %d)", (int)g_pptClick.x, (int)g_pptClick.y);
+    else
+        lstrcpyW(line, L"PPT 클릭 위치:  없음 - PPT에서 붙여넣을 칸을 클릭하세요");
+    DrawLine(dc, &y, line);
+
     EndPaint(hwnd, &ps);
 }
 
@@ -380,9 +476,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     switch (msg) {
     case WM_CREATE: {
         HWND b1 = CreateWindowW(L"BUTTON", L"일시정지 (F9)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                12, 114, 194, 30, hwnd, (HMENU)ID_BTN_PAUSE, NULL, NULL);
+                                12, 136, 194, 30, hwnd, (HMENU)ID_BTN_PAUSE, NULL, NULL);
         HWND b2 = CreateWindowW(L"BUTTON", L"종료", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                218, 114, 194, 30, hwnd, (HMENU)ID_BTN_EXIT, NULL, NULL);
+                                218, 136, 194, 30, hwnd, (HMENU)ID_BTN_EXIT, NULL, NULL);
         SendMessageW(b1, WM_SETFONT, (WPARAM)g_font, TRUE);
         SendMessageW(b2, WM_SETFONT, (WPARAM)g_font, TRUE);
         SetTimer(hwnd, 1, 1000, NULL); /* 창 이름 표시 갱신 */
@@ -422,7 +518,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show)
 {
     WNDCLASSW wc;
     MSG msg;
-    RECT rc = { 0, 0, 424, 156 };
+    RECT rc = { 0, 0, 424, 178 };
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
     DWORD exStyle = WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_APPWINDOW;
     HANDLE mutex;
@@ -435,6 +531,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show)
         MessageBoxW(NULL, L"ExcelCopy가 이미 실행 중입니다.", L"ExcelCopy", MB_OK | MB_ICONINFORMATION);
         return 0;
     }
+
+    /* 화면 배율(DPI)과 관계없이 클릭 좌표가 정확하도록 */
+    SetProcessDPIAware();
 
     fg = GetForegroundWindow();
     if (IsExcelWindow(fg)) g_lastExcel = fg;
@@ -475,6 +574,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show)
         MessageBoxW(NULL, L"키보드 후크 설치에 실패했습니다.", L"ExcelCopy", MB_OK | MB_ICONERROR);
         return 1;
     }
+    g_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, MouseProc, inst, 0);
     g_fgHook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, NULL,
                                ForegroundProc, 0, 0, WINEVENT_OUTOFCONTEXT);
 
@@ -488,6 +588,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show)
     }
 
     if (g_fgHook) UnhookWinEvent(g_fgHook);
+    if (g_mouseHook) UnhookWindowsHookEx(g_mouseHook);
     UnhookWindowsHookEx(g_kbHook);
     DeleteObject(g_font);
     DeleteObject(g_fontBold);
