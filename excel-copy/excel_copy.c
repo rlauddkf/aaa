@@ -4,7 +4,7 @@
  * Ctrl+Shift 가 함께 눌리는 즉시 아래 동작을 LOOP_COUNT(3)번 반복한다.
  *   1. 엑셀:       Ctrl+Shift+↓ (아래로 데이터 끝까지 선택) → Ctrl+C (복사)
  *   2. 파워포인트: 창 전환 → Ctrl+V (붙여넣기) → → 1번
- *   3. 엑셀:       창 전환 → → 19번
+ *   3. 엑셀:       창 전환 → → 19번 (마지막 회차는 생략, 파워포인트에서 끝남)
  *
  * 각 단계는 고정 대기 대신 "복사 완료(클립보드 변경)", "창 전환 완료",
  * "프로그램이 입력 처리를 마침"을 확인하는 즉시 다음으로 넘어간다.
@@ -222,6 +222,8 @@ static LONG RunMacro(void)
         if (!ActivateWindow(ppt)) return RES_SWITCH_FAIL;
         PptPaste(ppt);
 
+        if (r == LOOP_COUNT) break; /* 마지막 회차는 엑셀로 돌아가지 않음 */
+
         if (g_abort) return RES_ABORTED;
         if (!ActivateWindow(excel)) return RES_SWITCH_FAIL;
         ExcelMoveRight(excel);
@@ -321,7 +323,7 @@ static void DrawLine(HDC dc, int *y, const WCHAR *text)
 static void Paint(HWND hwnd)
 {
     static const WCHAR *results[] = {
-        L"동작:  복사 → PPT 붙여넣기 → 엑셀 → 19번  ×3회",
+        L"동작:  복사 → PPT 붙여넣기 → 엑셀 →19번 ×3회 (마지막 →19 생략)",
         L"최근 결과:  3회 반복 완료",
         L"최근 결과:  엑셀 창을 찾지 못했습니다",
         L"최근 결과:  파워포인트 창을 찾지 못했습니다",
