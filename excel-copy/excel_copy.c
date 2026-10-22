@@ -1,31 +1,29 @@
 /*
- * ExcelCopy - 엑셀 → 파워포인트 반복 복사/붙여넣기 매크로
+ * ExcelCopy - 엑셀 열 → 파워포인트 슬라이드 복사/붙여넣기 매크로
  *
- * Ctrl+Shift 가 함께 눌리는 즉시 실행한다.
+ * 준비: 파워포인트에서 붙여넣을 위치를 클릭 → 엑셀에서 원하는 행의 셀을 클릭
+ * 실행: Ctrl+Shift
  *
- * [한 페이지 작업] LOOP_COUNT(3)회 반복
- *   1. 엑셀:       Ctrl+Shift+↓ (아래로 데이터 끝까지 선택) → Ctrl+C (복사)
- *   2. 파워포인트: 창 전환 → Ctrl+V (붙여넣기) → → 1번
- *   3. 엑셀:       창 전환 → → 19번 (마지막 회차는 생략)
+ *   1. 엑셀에서 선택된 셀의 행 번호를 읽는다.
+ *   2. 파워포인트에서 마지막으로 클릭한 위치를 기억해 둔다.
+ *   3. 슬라이드마다 아래 열 순서로, [그 행의 셀부터 아래로 데이터 끝까지] 복사하고
+ *      파워포인트 클릭 위치에 붙여넣은 뒤 → 1번.
+ *        슬라이드 1: D,  AA, AX
+ *        슬라이드 2: K,  AH, BE   (PageDown 후 같은 위치 클릭)
+ *        슬라이드 3: S,  AP, BM   (PageDown 후 같은 위치 클릭)
  *
- * [다음 페이지 준비] 한 페이지 작업이 끝날 때마다 (마지막 페이지 제외)
- *   - 파워포인트: Esc Esc → PageDown (다음 슬라이드) → 처음에 클릭했던 위치 클릭
- *   - 엑셀:       이번 페이지 시작 셀로 돌아가서 → 7번 (다음 시작 셀)
- *
- * 전체: 한 페이지 작업을 PAGE_COUNT(3)번 = 작업 → 준비 → 작업 → 준비 → 작업
- *
- * 시작 전에 파워포인트에서 붙여넣을 위치를 클릭해 두면 그 위치가 기록된다.
- *
- * 각 단계는 고정 대기 대신 "복사 완료(클립보드 변경)", "창 전환 완료",
- * "프로그램이 입력 처리를 마침"을 확인하는 즉시 다음으로 넘어간다.
+ * 엑셀 복사는 엑셀에 직접 연결(COM)해서 처리하므로 엑셀 창으로 전환하지 않는다.
+ * (범위 = 그 행의 셀부터 Ctrl+Shift+↓ 와 같은 끝까지)
  *
  * Esc : 실행 중 중지
  * F9  : 일시정지 / 재개
  * 종료: 창의 [종료] 버튼 또는 창 닫기
  *
+ * 실행할 때마다 exe와 같은 폴더에 ExcelCopy_log.txt 로 단계별 기록을 남긴다.
+ *
  * 빌드 (MinGW-w64):
  *   x86_64-w64-mingw32-gcc -O2 -s -static -municode -mwindows \
- *       excel_copy.c -o ExcelCopy.exe
+ *       excel_copy.c -o ExcelCopy.exe -lole32 -loleaut32 -luuid
  */
 #define WIN32_LEAN_AND_MEAN
 #ifndef UNICODE
@@ -35,14 +33,24 @@
 #define _UNICODE
 #endif
 #include <windows.h>
+#include <ole2.h>
+#include <oleauto.h>
+#include <stdarg.h>
 
-#define LOOP_COUNT        3   /* 전체 반복 횟수 */
-#define PPT_RIGHT_COUNT   1   /* 붙여넣기 후 파워포인트에서 → 횟수 */
-#define EXCEL_RIGHT_COUNT 19  /* 엑셀로 돌아와서 → 횟수 */
-#define PAGE_COUNT        3   /* 페이지(슬라이드) 반복 횟수 */
-#define NEXT_PAGE_OFFSET  7   /* 다음 페이지 작업 때 엑셀 시작 셀을 오른쪽으로 옮길 칸 수 */
+#define PAGE_COUNT      3   /* 슬라이드 수 */
+#define COLS_PER_PAGE   3   /* 슬라이드마다 복사할 열 수 */
+#define PPT_RIGHT_COUNT 1   /* 붙여넣기 후 파워포인트에서 → 횟수 */
 
-#define MACRO_SIGNATURE ((ULONG_PTR)0x58434350) /* 매크로가 보낸 키 표시 */
+/* 슬라이드별로 복사할 엑셀 열 */
+static const WCHAR *const COLUMNS[PAGE_COUNT][COLS_PER_PAGE] = {
+    { L"D", L"AA", L"AX" },
+    { L"K", L"AH", L"BE" },
+    { L"S", L"AP", L"BM" },
+};
+
+#define XL_DOWN (-4121) /* Excel 상수 xlDown */
+
+#define MACRO_SIGNATURE ((ULONG_PTR)0x58434350) /* 매크로가 보낸 입력 표시 */
 
 #define WM_APP_UPDATE  (WM_APP + 2)
 
@@ -51,7 +59,7 @@
 
 /* 실행 결과 */
 enum { RES_NONE, RES_DONE, RES_NO_EXCEL, RES_NO_PPT, RES_SWITCH_FAIL, RES_COPY_FAIL, RES_ABORTED,
-       RES_NO_PPT_POS };
+       RES_NO_PPT_POS, RES_NO_ROW, RES_MAX };
 
 static HWND  g_wnd;
 static HHOOK g_kbHook, g_mouseHook;
@@ -59,14 +67,14 @@ static HANDLE g_triggerEvent;           /* 작업 스레드를 깨우는 신호 
 static HWINEVENTHOOK g_fgHook;
 static HFONT g_font, g_fontBold;
 
-static HWND g_lastExcel;                /* 마지막으로 활성화됐던 엑셀 창 */
 static HWND g_lastPpt;                  /* 마지막으로 활성화됐던 파워포인트 창 */
 static volatile LONG g_busy;            /* 매크로 실행 중 여부 */
 static volatile LONG g_abort;           /* Esc로 중지 요청 */
 static volatile LONG g_paused;          /* 일시정지 여부 */
 static volatile LONG g_result;          /* 최근 실행 결과 (RES_*) */
-static volatile LONG g_round;           /* 현재 반복 회차 (1~LOOP_COUNT) */
-static volatile LONG g_page;            /* 현재 페이지 (1~PAGE_COUNT) */
+static volatile LONG g_page;            /* 현재 슬라이드 (1~PAGE_COUNT) */
+static volatile LONG g_col;             /* 현재 열 순서 (1~COLS_PER_PAGE) */
+static volatile LONG g_row;             /* 엑셀에서 읽은 행 번호 */
 static POINT g_pptClick;                /* 사용자가 파워포인트에서 마지막으로 클릭한 위치 */
 static volatile LONG g_hasPptClick;
 
@@ -74,23 +82,60 @@ static volatile LONG g_hasPptClick;
 static BOOL g_ctrlDown, g_shiftDown;
 static BOOL g_fired;                    /* 이번 Ctrl+Shift 누름에서 이미 실행했음 (자동반복 방지) */
 
-static BOOL HasClass(HWND hwnd, const WCHAR *name)
+/* ---------------------------------------------------------------- 기록 */
+
+static HANDLE g_log = INVALID_HANDLE_VALUE;
+static DWORD g_logStart;
+
+static void LogOpen(void)
+{
+    WCHAR path[MAX_PATH];
+    WCHAR *slash, *c;
+    DWORD w;
+
+    GetModuleFileNameW(NULL, path, MAX_PATH);
+    slash = path;
+    for (c = path; *c; c++) if (*c == L'\\') slash = c + 1;
+    lstrcpyW(slash, L"ExcelCopy_log.txt");
+    g_log = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS,
+                        FILE_ATTRIBUTE_NORMAL, NULL);
+    if (g_log != INVALID_HANDLE_VALUE)
+        WriteFile(g_log, "\xEF\xBB\xBF", 3, &w, NULL); /* UTF-8 BOM (메모장 한글 표시용) */
+    g_logStart = GetTickCount();
+}
+
+static void LogClose(void)
+{
+    if (g_log != INVALID_HANDLE_VALUE) CloseHandle(g_log);
+    g_log = INVALID_HANDLE_VALUE;
+}
+
+static void Log(const WCHAR *fmt, ...)
+{
+    WCHAR buf[600];
+    char utf8[1800];
+    va_list ap;
+    int len, n;
+    DWORD w;
+
+    if (g_log == INVALID_HANDLE_VALUE) return;
+    len = wsprintfW(buf, L"[%6lu ms] ", GetTickCount() - g_logStart);
+    va_start(ap, fmt);
+    wvsprintfW(buf + len, fmt, ap);
+    va_end(ap);
+    lstrcatW(buf, L"\r\n");
+    n = WideCharToMultiByte(CP_UTF8, 0, buf, -1, utf8, sizeof(utf8), NULL, NULL);
+    if (n > 1) WriteFile(g_log, utf8, n - 1, &w, NULL);
+}
+
+/* ---------------------------------------------------------------- 창 */
+
+static BOOL IsPptWindow(HWND hwnd)
 {
     WCHAR cls[32];
     if (!hwnd || !IsWindow(hwnd)) return FALSE;
     if (!GetClassNameW(hwnd, cls, 32)) return FALSE;
-    return lstrcmpW(cls, name) == 0;
-}
-
-static BOOL IsExcelWindow(HWND hwnd) { return HasClass(hwnd, L"XLMAIN"); }
-static BOOL IsPptWindow(HWND hwnd)   { return HasClass(hwnd, L"PPTFrameClass"); }
-
-static HWND FindExcel(void)
-{
-    HWND fg = GetForegroundWindow();
-    if (IsExcelWindow(fg)) return fg;
-    if (IsExcelWindow(g_lastExcel)) return g_lastExcel;
-    return FindWindowW(L"XLMAIN", NULL); /* 화면 맨 위의 엑셀 창 */
+    return lstrcmpW(cls, L"PPTFrameClass") == 0;
 }
 
 static HWND FindPpt(void)
@@ -135,7 +180,6 @@ static BOOL ActivateWindow(HWND hwnd)
     SetForegroundWindow(hwnd);
     if (fgThread && fgThread != myThread) AttachThreadInput(myThread, fgThread, FALSE);
 
-    /* 창 전환이 끝나는 즉시 진행 */
     for (i = 0; i < 20 && GetForegroundWindow() != hwnd; i++)
         Sleep(5);
     if (GetForegroundWindow() != hwnd) {
@@ -144,9 +188,11 @@ static BOOL ActivateWindow(HWND hwnd)
             Sleep(5);
     }
     if (GetForegroundWindow() != hwnd) return FALSE;
-    WaitIdle(hwnd); /* 포커스 처리가 끝날 때까지 */
+    WaitIdle(hwnd);
     return TRUE;
 }
+
+/* ---------------------------------------------------------------- 키보드/마우스 입력 */
 
 static void AddKey(INPUT *in, int *n, WORD vk, BOOL up)
 {
@@ -155,7 +201,7 @@ static void AddKey(INPUT *in, int *n, WORD vk, BOOL up)
     k->type = INPUT_KEYBOARD;
     k->ki.wVk = vk;
     k->ki.wScan = (WORD)MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
-    if (vk == VK_DOWN || vk == VK_RIGHT) k->ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+    if (vk == VK_RIGHT || vk == VK_NEXT) k->ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
     if (up) k->ki.dwFlags |= KEYEVENTF_KEYUP;
     k->ki.dwExtraInfo = MACRO_SIGNATURE;
 }
@@ -166,40 +212,164 @@ static void AddTap(INPUT *in, int *n, WORD vk)
     AddKey(in, n, vk, TRUE);
 }
 
-/* 엑셀: Ctrl+Shift+↓ → Ctrl+C. 클립보드가 바뀔 때까지 기다린다. */
-static BOOL ExcelSelectCopy(HWND excel)
+static void ClickAt(HWND target, POINT pt)
 {
-    INPUT in[8];
-    int n = 0, i;
-    DWORD seq = GetClipboardSequenceNumber();
+    INPUT in[2];
+    POINT old;
 
-    /* 사용자가 Ctrl+Shift를 누르고 있을 수 있으므로 복사 전에 Shift를 떼고,
-     * 끝나면 Ctrl도 떼어 키가 눌린 채로 남지 않게 한다. */
-    AddKey(in, &n, VK_CONTROL, FALSE);  /* Ctrl+Shift+↓ */
-    AddKey(in, &n, VK_SHIFT, FALSE);
-    AddTap(in, &n, VK_DOWN);
-    AddKey(in, &n, VK_SHIFT, TRUE);
-    AddTap(in, &n, 'C');                /* Ctrl+C */
-    AddKey(in, &n, VK_CONTROL, TRUE);
-    SendInput(n, in, sizeof(INPUT));
-
-    for (i = 0; i < 600 && GetClipboardSequenceNumber() == seq; i++) /* 최대 3초 */
-        Sleep(5);
-    WaitIdle(excel);
-    return GetClipboardSequenceNumber() != seq;
+    GetCursorPos(&old);
+    SetCursorPos(pt.x, pt.y);
+    ZeroMemory(in, sizeof(in));
+    in[0].type = in[1].type = INPUT_MOUSE;
+    in[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+    in[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
+    in[0].mi.dwExtraInfo = in[1].mi.dwExtraInfo = MACRO_SIGNATURE;
+    SendInput(2, in, sizeof(INPUT));
+    WaitIdle(target);
+    SetCursorPos(old.x, old.y);
 }
 
-/* 파워포인트: Ctrl+V → → PPT_RIGHT_COUNT번 */
+/* ---------------------------------------------------------------- 엑셀 (COM) */
+
+/* 이름으로 속성/메서드 호출. 인자는 뒤에서부터 순서대로 넘긴다 (COM 규칙).
+ * 엑셀이 바쁘면(셀 편집 중 등) 거절되므로 잠시 재시도한다. */
+static HRESULT Invoke(IDispatch *obj, WORD flags, const WCHAR *name, VARIANT *result,
+                      int argc, ...)
+{
+    DISPID id;
+    DISPPARAMS dp = { NULL, NULL, 0, 0 };
+    VARIANT args[4];
+    LPOLESTR nm = (LPOLESTR)name;
+    HRESULT hr;
+    va_list ap;
+    int i, tries;
+
+    if (result) VariantInit(result);
+    if (!obj) return E_POINTER;
+    hr = obj->lpVtbl->GetIDsOfNames(obj, &IID_NULL, &nm, 1, LOCALE_USER_DEFAULT, &id);
+    if (FAILED(hr)) return hr;
+
+    va_start(ap, argc);
+    for (i = 0; i < argc && i < 4; i++) args[i] = va_arg(ap, VARIANT);
+    va_end(ap);
+    dp.cArgs = argc;
+    dp.rgvarg = args;
+
+    for (tries = 0; tries < 60; tries++) { /* 최대 약 3초 */
+        hr = obj->lpVtbl->Invoke(obj, id, &IID_NULL, LOCALE_USER_DEFAULT, flags, &dp,
+                                 result, NULL, NULL);
+        if (hr != RPC_E_CALL_REJECTED && hr != RPC_E_SERVERCALL_RETRYLATER) break;
+        Sleep(50);
+    }
+    return hr;
+}
+
+static IDispatch *GetDisp(IDispatch *obj, const WCHAR *name)
+{
+    VARIANT v;
+    if (FAILED(Invoke(obj, DISPATCH_PROPERTYGET, name, &v, 0))) return NULL;
+    if (v.vt != VT_DISPATCH) { VariantClear(&v); return NULL; }
+    return v.pdispVal;
+}
+
+static void Release(IDispatch *d)
+{
+    if (d) d->lpVtbl->Release(d);
+}
+
+static IDispatch *ConnectExcel(void)
+{
+    CLSID clsid;
+    IUnknown *unk = NULL;
+    IDispatch *app = NULL;
+
+    if (FAILED(CLSIDFromProgID(L"Excel.Application", &clsid))) return NULL;
+    if (FAILED(GetActiveObject(&clsid, NULL, &unk)) || !unk) return NULL;
+    unk->lpVtbl->QueryInterface(unk, &IID_IDispatch, (void **)&app);
+    unk->lpVtbl->Release(unk);
+    return app;
+}
+
+/* 엑셀에서 선택된 셀의 행 번호 (실패하면 0) */
+static LONG ExcelActiveRow(IDispatch *app)
+{
+    IDispatch *cell = GetDisp(app, L"ActiveCell");
+    VARIANT v;
+    LONG row = 0;
+
+    if (cell && SUCCEEDED(Invoke(cell, DISPATCH_PROPERTYGET, L"Row", &v, 0))) {
+        if (SUCCEEDED(VariantChangeType(&v, &v, 0, VT_I4))) row = v.lVal;
+        VariantClear(&v);
+    }
+    Release(cell);
+    return row;
+}
+
+/* 엑셀: [열][행] 셀부터 아래로 데이터 끝까지(Ctrl+Shift+↓ 와 같은 범위) 복사 */
+static BOOL ExcelCopyColumn(IDispatch *app, const WCHAR *col, LONG row)
+{
+    IDispatch *sheet = GetDisp(app, L"ActiveSheet");
+    IDispatch *first = NULL, *last = NULL, *range = NULL;
+    WCHAR addr[32], rangeAddr[64] = L"?";
+    VARIANT v, a, b;
+    DWORD seq = GetClipboardSequenceNumber();
+    BOOL ok = FALSE;
+
+    wsprintfW(addr, L"%s%ld", col, row);
+    if (!sheet) goto done;
+
+    VariantInit(&a);
+    a.vt = VT_BSTR;
+    a.bstrVal = SysAllocString(addr);
+    Invoke(sheet, DISPATCH_PROPERTYGET, L"Range", &v, 1, a);
+    VariantClear(&a);
+    if (v.vt != VT_DISPATCH) goto done;
+    first = v.pdispVal;
+
+    VariantInit(&a);
+    a.vt = VT_I4;
+    a.lVal = XL_DOWN;
+    Invoke(first, DISPATCH_PROPERTYGET, L"End", &v, 1, a);
+    if (v.vt != VT_DISPATCH) goto done;
+    last = v.pdispVal;
+
+    VariantInit(&a); a.vt = VT_DISPATCH; a.pdispVal = first;
+    VariantInit(&b); b.vt = VT_DISPATCH; b.pdispVal = last;
+    Invoke(sheet, DISPATCH_PROPERTYGET, L"Range", &v, 2, b, a); /* Range(first, last) */
+    if (v.vt != VT_DISPATCH) goto done;
+    range = v.pdispVal;
+
+    if (SUCCEEDED(Invoke(range, DISPATCH_PROPERTYGET, L"Address", &v, 0))) {
+        if (v.vt == VT_BSTR && v.bstrVal) lstrcpynW(rangeAddr, v.bstrVal, 64);
+        VariantClear(&v);
+    }
+
+    if (FAILED(Invoke(range, DISPATCH_METHOD, L"Copy", NULL, 0))) goto done;
+    ok = GetClipboardSequenceNumber() != seq;
+
+done:
+    Log(L"  엑셀 %s 부터 복사 %s (범위 %s)", addr, ok ? L"완료" : L"실패", rangeAddr);
+    Release(range);
+    Release(last);
+    Release(first);
+    Release(sheet);
+    return ok;
+}
+
+/* ---------------------------------------------------------------- 파워포인트 */
+
+/* Ctrl+V → → PPT_RIGHT_COUNT번 */
 static void PptPaste(HWND ppt)
 {
-    INPUT in[4 + PPT_RIGHT_COUNT * 2];
+    INPUT in[6 + PPT_RIGHT_COUNT * 2];
     int n = 0, i;
 
+    AddKey(in, &n, VK_SHIFT, TRUE);     /* Ctrl+Shift를 누르고 있어도 Ctrl+Shift+V가 되지 않게 */
     AddKey(in, &n, VK_CONTROL, FALSE);
     AddTap(in, &n, 'V');
     AddKey(in, &n, VK_CONTROL, TRUE);
     SendInput(n, in, sizeof(INPUT));
-    /* 붙여넣기가 끝날 때까지 (붙여넣기 중에도 메시지를 처리할 수 있어 한 번 더 확인) */
+    /* 붙여넣기가 끝날 때까지 (다음 복사가 클립보드를 덮어쓰지 않도록) */
     WaitIdle(ppt);
     Sleep(50);
     WaitIdle(ppt);
@@ -209,27 +379,13 @@ static void PptPaste(HWND ppt)
         AddTap(in, &n, VK_RIGHT);
     SendInput(n, in, sizeof(INPUT));
     WaitIdle(ppt);
+    Log(L"  PPT 붙여넣기 + → %d번 완료", PPT_RIGHT_COUNT);
 }
 
-/* 엑셀: cols 칸만큼 이동 (양수: →, 음수: ←) */
-static void ExcelMove(HWND excel, int cols)
-{
-    INPUT in[2 * 64];
-    WORD vk = cols >= 0 ? VK_RIGHT : VK_LEFT;
-    int n = 0, i, count = cols >= 0 ? cols : -cols;
-
-    if (count > 64) count = 64;
-    for (i = 0; i < count; i++)
-        AddTap(in, &n, vk);
-    if (n) SendInput(n, in, sizeof(INPUT));
-    WaitIdle(excel);
-}
-
-/* 파워포인트: 선택 해제 → 다음 슬라이드 → 기록해 둔 위치 클릭 */
-static void PptNextPage(HWND ppt)
+/* 선택 해제 → PageDown (다음 슬라이드) */
+static void PptNextSlide(HWND ppt)
 {
     INPUT in[8];
-    POINT old;
     int n = 0;
 
     /* 셀 편집 → 셀 선택 → 표 선택 → 선택 없음 (남는 Esc는 아무 영향 없음) */
@@ -240,100 +396,97 @@ static void PptNextPage(HWND ppt)
     WaitIdle(ppt);
 
     n = 0;
-    AddTap(in, &n, VK_NEXT);    /* PageDown: 다음 슬라이드 */
+    AddTap(in, &n, VK_NEXT);
     SendInput(n, in, sizeof(INPUT));
     WaitIdle(ppt);
-    Sleep(50);                  /* 새 슬라이드가 화면에 그려질 시간 */
+    Sleep(50); /* 새 슬라이드가 화면에 그려질 시간 */
     WaitIdle(ppt);
-
-    GetCursorPos(&old);
-    SetCursorPos(g_pptClick.x, g_pptClick.y);
-    ZeroMemory(in, sizeof(INPUT) * 2);
-    in[0].type = in[1].type = INPUT_MOUSE;
-    in[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
-    in[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
-    in[0].mi.dwExtraInfo = in[1].mi.dwExtraInfo = MACRO_SIGNATURE;
-    SendInput(2, in, sizeof(INPUT));
-    WaitIdle(ppt);
-    SetCursorPos(old.x, old.y);
+    Log(L"  PPT Esc ×3 → PageDown 완료");
 }
 
-static void SetProgress(int page, int r)
+/* ---------------------------------------------------------------- 매크로 */
+
+static void SetProgress(int page, int col)
 {
     InterlockedExchange(&g_page, page);
-    InterlockedExchange(&g_round, r);
+    InterlockedExchange(&g_col, col);
     PostMessageW(g_wnd, WM_APP_UPDATE, 0, 0);
-}
-
-/* 한 페이지 작업: 복사 → 붙여넣기를 LOOP_COUNT번 (파워포인트 창에서 끝남) */
-static LONG RunPage(HWND excel, HWND ppt, int page)
-{
-    int r;
-
-    for (r = 1; r <= LOOP_COUNT; r++) {
-        SetProgress(page, r);
-
-        if (g_abort) return RES_ABORTED;
-        if (!ActivateWindow(excel)) return RES_SWITCH_FAIL;
-        if (!ExcelSelectCopy(excel)) return RES_COPY_FAIL;
-
-        if (g_abort) return RES_ABORTED;
-        if (!ActivateWindow(ppt)) return RES_SWITCH_FAIL;
-        PptPaste(ppt);
-
-        if (r == LOOP_COUNT) break; /* 마지막 회차는 엑셀로 돌아가지 않음 */
-
-        if (g_abort) return RES_ABORTED;
-        if (!ActivateWindow(excel)) return RES_SWITCH_FAIL;
-        ExcelMove(excel, EXCEL_RIGHT_COUNT);
-    }
-    return RES_DONE;
 }
 
 static LONG RunMacro(void)
 {
-    HWND excel = FindExcel();
     HWND ppt = FindPpt();
-    LONG res;
-    int page;
+    IDispatch *app;
+    LONG row, res = RES_DONE;
+    int page, c;
 
-    if (!excel) return RES_NO_EXCEL;
+    Log(L"시작: PPT 창 = %s, PPT 클릭 위치 = %s (%d, %d)",
+        ppt ? L"있음" : L"없음", g_hasPptClick ? L"기록됨" : L"없음",
+        (int)g_pptClick.x, (int)g_pptClick.y);
     if (!ppt) return RES_NO_PPT;
-    if (PAGE_COUNT > 1 && !g_hasPptClick) return RES_NO_PPT_POS;
+    if (!g_hasPptClick) return RES_NO_PPT_POS;
 
-    for (page = 1; page <= PAGE_COUNT; page++) {
-        res = RunPage(excel, ppt, page);
-        if (res != RES_DONE) return res;
-
-        if (page == PAGE_COUNT) break; /* 마지막 페이지는 다음 페이지 준비 생략 */
-
-        /* 다음 페이지 준비 (지금 파워포인트 창이 활성 상태) */
-        if (g_abort) return RES_ABORTED;
-        PptNextPage(ppt);
-
-        if (g_abort) return RES_ABORTED;
-        if (!ActivateWindow(excel)) return RES_SWITCH_FAIL;
-        /* 이번 페이지 시작 셀로 돌아간 뒤 NEXT_PAGE_OFFSET칸 오른쪽 */
-        ExcelMove(excel, NEXT_PAGE_OFFSET - EXCEL_RIGHT_COUNT * (LOOP_COUNT - 1));
+    app = ConnectExcel();
+    if (!app) {
+        Log(L"엑셀 연결 실패");
+        return RES_NO_EXCEL;
     }
-    return RES_DONE;
+
+    /* 1. 선택된 셀의 행 번호 */
+    row = ExcelActiveRow(app);
+    InterlockedExchange(&g_row, row);
+    Log(L"엑셀 선택 행 = %ld", row);
+    if (row <= 0) { Release(app); return RES_NO_ROW; }
+
+    if (!ActivateWindow(ppt)) { Release(app); return RES_SWITCH_FAIL; }
+
+    for (page = 1; page <= PAGE_COUNT && res == RES_DONE; page++) {
+        Log(L"[슬라이드 %d]", page);
+        if (page > 1) {
+            if (g_abort) { res = RES_ABORTED; break; }
+            if (!ActivateWindow(ppt)) { res = RES_SWITCH_FAIL; break; }
+            PptNextSlide(ppt);
+        }
+        /* 붙여넣을 위치 클릭 (첫 슬라이드도 다시 클릭해서 위치를 확실히 잡음) */
+        ClickAt(ppt, g_pptClick);
+        Log(L"  PPT 위치 클릭 (%d, %d)", (int)g_pptClick.x, (int)g_pptClick.y);
+
+        for (c = 0; c < COLS_PER_PAGE; c++) {
+            SetProgress(page, c + 1);
+            if (g_abort) { res = RES_ABORTED; break; }
+            if (!ExcelCopyColumn(app, COLUMNS[page - 1][c], row)) { res = RES_COPY_FAIL; break; }
+
+            if (g_abort) { res = RES_ABORTED; break; }
+            if (!ActivateWindow(ppt)) { res = RES_SWITCH_FAIL; break; }
+            PptPaste(ppt);
+        }
+    }
+
+    Release(app);
+    return res;
 }
 
-/* 실제 키 전송은 미리 띄워 둔 작업 스레드에서 수행한다.
+/* 실제 동작은 미리 띄워 둔 작업 스레드에서 수행한다.
  * (키보드 후크가 있는 메인 스레드를 막으면 시스템 전체 입력이 느려진다) */
 static DWORD WINAPI MacroThread(LPVOID param)
 {
     (void)param;
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     for (;;) {
         WaitForSingleObject(g_triggerEvent, INFINITE);
         InterlockedExchange(&g_abort, 0);
+        LogOpen();
         InterlockedExchange(&g_result, RunMacro());
+        Log(L"끝: 결과 코드 = %d", (int)g_result);
+        LogClose();
         SetProgress(0, 0);
         InterlockedExchange(&g_busy, 0);
         PostMessageW(g_wnd, WM_APP_UPDATE, 0, 0);
     }
     return 0;
 }
+
+/* ---------------------------------------------------------------- 후크 */
 
 static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
 {
@@ -386,7 +539,7 @@ static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
     return CallNextHookEx(g_kbHook, nCode, wParam, lParam);
 }
 
-/* 사용자가 파워포인트 창 안을 클릭하면 그 위치를 기록 (다음 페이지에서 같은 위치를 클릭) */
+/* 사용자가 파워포인트 창 안을 클릭하면 그 위치를 기록 */
 static LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam)
 {
     if (nCode == HC_ACTION && wParam == WM_LBUTTONDOWN && !g_busy) {
@@ -408,14 +561,13 @@ static void CALLBACK ForegroundProc(HWINEVENTHOOK hook, DWORD event, HWND hwnd,
                                     DWORD thread, DWORD time)
 {
     (void)hook; (void)event; (void)idObject; (void)idChild; (void)thread; (void)time;
-    if (IsExcelWindow(hwnd))
-        g_lastExcel = hwnd;
-    else if (IsPptWindow(hwnd))
+    if (IsPptWindow(hwnd)) {
         g_lastPpt = hwnd;
-    else
-        return;
-    InvalidateRect(g_wnd, NULL, TRUE);
+        InvalidateRect(g_wnd, NULL, TRUE);
+    }
 }
+
+/* ---------------------------------------------------------------- 화면 */
 
 static void DrawLine(HDC dc, int *y, const WCHAR *text)
 {
@@ -427,22 +579,23 @@ static void DrawLine(HDC dc, int *y, const WCHAR *text)
 
 static void Paint(HWND hwnd)
 {
-    static const WCHAR *results[] = {
-        L"동작:  복사/붙여넣기 3회 × 3페이지",
-        L"최근 결과:  3페이지 모두 완료",
-        L"최근 결과:  엑셀 창을 찾지 못했습니다",
+    static const WCHAR *results[RES_MAX] = {
+        L"PPT 위치 클릭 → 엑셀 셀 클릭 → Ctrl+Shift",
+        L"최근 결과:  3슬라이드 모두 완료",
+        L"최근 결과:  엑셀에 연결하지 못했습니다",
         L"최근 결과:  파워포인트 창을 찾지 못했습니다",
         L"최근 결과:  창 전환에 실패했습니다",
-        L"최근 결과:  엑셀 복사에 실패했습니다",
+        L"최근 결과:  엑셀 복사에 실패했습니다 (셀 편집 중인지 확인)",
         L"최근 결과:  Esc로 중지했습니다",
         L"최근 결과:  PPT에서 붙여넣을 위치를 먼저 클릭하세요",
+        L"최근 결과:  엑셀 선택 셀의 행 번호를 읽지 못했습니다",
     };
     PAINTSTRUCT ps;
     HDC dc = BeginPaint(hwnd, &ps);
     WCHAR title[128];
     WCHAR line[256];
     HWND w;
-    LONG res = g_result;
+    LONG res = g_result, page = g_page, col = g_col;
     int y = 10;
 
     SetBkMode(dc, TRANSPARENT);
@@ -453,8 +606,11 @@ static void Paint(HWND hwnd)
         lstrcpyW(line, L"● 일시정지됨  (F9: 재개)");
     } else if (g_busy) {
         SetTextColor(dc, RGB(30, 90, 200));
-        wsprintfW(line, L"● 실행 중  페이지 %d/%d · 회차 %d/%d  (Esc: 중지)",
-                  (int)g_page, PAGE_COUNT, (int)g_round, LOOP_COUNT);
+        if (page > 0 && page <= PAGE_COUNT && col > 0 && col <= COLS_PER_PAGE)
+            wsprintfW(line, L"● 실행 중  슬라이드 %d/%d · %s열  (Esc: 중지)",
+                      (int)page, PAGE_COUNT, COLUMNS[page - 1][col - 1]);
+        else
+            lstrcpyW(line, L"● 실행 중  (Esc: 중지)");
     } else {
         SetTextColor(dc, RGB(30, 140, 60));
         lstrcpyW(line, L"● 대기 중 - Ctrl+Shift 누르면 실행  (F9: 일시정지)");
@@ -464,13 +620,13 @@ static void Paint(HWND hwnd)
 
     SelectObject(dc, g_font);
     SetTextColor(dc, RGB(20, 20, 20));
-    if (res < 0 || res > RES_NO_PPT_POS) res = RES_NONE;
+    if (res < 0 || res >= RES_MAX) res = RES_NONE;
     DrawLine(dc, &y, results[res]);
 
-    title[0] = 0;
-    w = FindExcel();
-    if (w) GetWindowTextW(w, title, 128);
-    wsprintfW(line, L"엑셀:  %s", w ? (title[0] ? title : L"Excel") : L"(없음)");
+    if (g_row > 0)
+        wsprintfW(line, L"엑셀 행:  %ld  (D/AA/AX → K/AH/BE → S/AP/BM)", g_row);
+    else
+        lstrcpyW(line, L"엑셀 행:  실행할 때 선택된 셀에서 읽음");
     DrawLine(dc, &y, line);
 
     title[0] = 0;
@@ -539,7 +695,6 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show)
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
     DWORD exStyle = WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_APPWINDOW;
     HANDLE mutex;
-    HWND fg;
     (void)prev; (void)cmd; (void)show;
 
     /* 중복 실행 방지 */
@@ -558,9 +713,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show)
             SetProcessDPIAware();
     }
 
-    fg = GetForegroundWindow();
-    if (IsExcelWindow(fg)) g_lastExcel = fg;
-    if (IsPptWindow(fg))   g_lastPpt = fg;
+    if (IsPptWindow(GetForegroundWindow()))
+        g_lastPpt = GetForegroundWindow();
 
     g_font = CreateFontW(-15, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0,
                          CLEARTYPE_QUALITY, 0, L"Malgun Gothic");
@@ -577,7 +731,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show)
     RegisterClassW(&wc);
 
     AdjustWindowRectEx(&rc, style, FALSE, exStyle);
-    g_wnd = CreateWindowExW(exStyle, wc.lpszClassName, L"ExcelCopy - 엑셀 → 파워포인트 반복 붙여넣기", style,
+    g_wnd = CreateWindowExW(exStyle, wc.lpszClassName, L"ExcelCopy - 엑셀 열 → 파워포인트 붙여넣기", style,
                             CW_USEDEFAULT, CW_USEDEFAULT,
                             rc.right - rc.left, rc.bottom - rc.top,
                             NULL, NULL, inst, NULL);
