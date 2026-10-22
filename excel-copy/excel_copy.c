@@ -6,11 +6,15 @@
  *
  *   1. 엑셀에서 선택된 셀의 행 번호를 읽는다.
  *   2. 파워포인트에서 마지막으로 클릭한 위치를 기억해 둔다.
- *   3. 슬라이드마다 아래 열 순서로, [그 행의 셀부터 아래로 데이터 끝까지] 복사하고
+ *   3. 슬라이드마다 입력한 열 순서로, [그 행의 셀부터 아래로 데이터 끝까지] 복사하고
  *      파워포인트 클릭 위치에 붙여넣은 뒤 → 1번.
- *        슬라이드 1: D,  AA, AX
- *        슬라이드 2: K,  AH, BE   (PageDown 후 같은 위치 클릭)
- *        슬라이드 3: S,  AP, BM   (PageDown 후 같은 위치 클릭)
+ *      두 번째 슬라이드부터는 PageDown 후 같은 위치를 클릭하고 시작한다.
+ *
+ * 열 입력 (상태 창의 입력칸, exe 옆 ExcelCopy_columns.txt 에 자동 저장)
+ *   한 줄 = 한 슬라이드, 열은 쉼표나 띄어쓰기로 구분. 예)
+ *     D, AA, AX
+ *     K, AH, BE
+ *     S, AP, BM
  *
  * 엑셀 복사는 엑셀에 직접 연결(COM)해서 처리하므로 엑셀 창으로 전환하지 않는다.
  * (범위 = 그 행의 셀부터 Ctrl+Shift+↓ 와 같은 끝까지)
@@ -37,16 +41,23 @@
 #include <oleauto.h>
 #include <stdarg.h>
 
-#define PAGE_COUNT      3   /* 슬라이드 수 */
-#define COLS_PER_PAGE   3   /* 슬라이드마다 복사할 열 수 */
 #define PPT_RIGHT_COUNT 1   /* 붙여넣기 후 파워포인트에서 → 횟수 */
 
-/* 슬라이드별로 복사할 엑셀 열 */
-static const WCHAR *const COLUMNS[PAGE_COUNT][COLS_PER_PAGE] = {
-    { L"D", L"AA", L"AX" },
-    { L"K", L"AH", L"BE" },
-    { L"S", L"AP", L"BM" },
-};
+#define MAX_PAGES 30        /* 입력할 수 있는 최대 슬라이드(줄) 수 */
+#define MAX_COLS  30        /* 한 슬라이드에 입력할 수 있는 최대 열 수 */
+
+#define DEFAULT_COLUMNS L"D, AA, AX\r\nK, AH, BE\r\nS, AP, BM"
+
+/* 슬라이드별로 복사할 엑셀 열 (입력칸에서 읽음) */
+typedef struct {
+    int pages;
+    int cols[MAX_PAGES];
+    WCHAR name[MAX_PAGES][MAX_COLS][4];
+    int error;              /* 잘못 입력한 줄 번호 (0 = 없음) */
+} ColumnConfig;
+
+static ColumnConfig g_cfg;
+static CRITICAL_SECTION g_cfgLock;
 
 #define XL_DOWN (-4121) /* Excel 상수 xlDown */
 
@@ -56,24 +67,26 @@ static const WCHAR *const COLUMNS[PAGE_COUNT][COLS_PER_PAGE] = {
 
 #define ID_BTN_PAUSE   101
 #define ID_BTN_EXIT    102
+#define ID_EDIT_COLS   103
 
 /* 실행 결과 */
 enum { RES_NONE, RES_DONE, RES_NO_EXCEL, RES_NO_PPT, RES_SWITCH_FAIL, RES_COPY_FAIL, RES_ABORTED,
-       RES_NO_PPT_POS, RES_NO_ROW, RES_MAX };
+       RES_NO_PPT_POS, RES_NO_ROW, RES_BAD_COLS, RES_MAX };
 
 static HWND  g_wnd;
 static HHOOK g_kbHook, g_mouseHook;
 static HANDLE g_triggerEvent;           /* 작업 스레드를 깨우는 신호 */
 static HWINEVENTHOOK g_fgHook;
 static HFONT g_font, g_fontBold;
+static HWND  g_edit;                    /* 열 입력칸 */
 
 static HWND g_lastPpt;                  /* 마지막으로 활성화됐던 파워포인트 창 */
 static volatile LONG g_busy;            /* 매크로 실행 중 여부 */
 static volatile LONG g_abort;           /* Esc로 중지 요청 */
 static volatile LONG g_paused;          /* 일시정지 여부 */
 static volatile LONG g_result;          /* 최근 실행 결과 (RES_*) */
-static volatile LONG g_page;            /* 현재 슬라이드 (1~PAGE_COUNT) */
-static volatile LONG g_col;             /* 현재 열 순서 (1~COLS_PER_PAGE) */
+static volatile LONG g_page;            /* 현재 슬라이드 (1부터) */
+static volatile LONG g_col;             /* 현재 슬라이드에서 몇 번째 열인지 (1부터) */
 static volatile LONG g_row;             /* 엑셀에서 읽은 행 번호 */
 static POINT g_pptClick;                /* 사용자가 파워포인트에서 마지막으로 클릭한 위치 */
 static volatile LONG g_hasPptClick;
@@ -126,6 +139,107 @@ static void Log(const WCHAR *fmt, ...)
     lstrcatW(buf, L"\r\n");
     n = WideCharToMultiByte(CP_UTF8, 0, buf, -1, utf8, sizeof(utf8), NULL, NULL);
     if (n > 1) WriteFile(g_log, utf8, n - 1, &w, NULL);
+}
+
+/* ---------------------------------------------------------------- 열 입력 */
+
+/* "D, AA, AX" 줄들을 읽어서 cfg에 채움. 잘못된 열 이름이 있으면 cfg->error에 줄 번호 */
+static void ParseColumns(const WCHAR *text, ColumnConfig *cfg)
+{
+    int line = 1;
+    const WCHAR *p = text;
+
+    ZeroMemory(cfg, sizeof(*cfg));
+    while (*p && cfg->pages < MAX_PAGES) {
+        int n = 0;
+        /* 한 줄 읽기 */
+        while (*p && *p != L'\n') {
+            WCHAR tok[8];
+            int len = 0, bad = 0;
+            while (*p == L' ' || *p == L'\t' || *p == L',' || *p == L'\r' || *p == 0x3000)
+                p++;
+            if (!*p || *p == L'\n') break;
+            while (*p && *p != L' ' && *p != L'\t' && *p != L',' && *p != L'\r' && *p != L'\n'
+                   && *p != 0x3000) {
+                WCHAR ch = *p++;
+                if (ch >= L'a' && ch <= L'z') ch -= 32;
+                if (ch < L'A' || ch > L'Z') bad = 1;
+                if (len < 7) tok[len] = ch;
+                len++;
+            }
+            if (bad || len > 3) {
+                if (!cfg->error) cfg->error = line;
+                continue;
+            }
+            if (n < MAX_COLS) {
+                CopyMemory(cfg->name[cfg->pages][n], tok, len * sizeof(WCHAR));
+                cfg->name[cfg->pages][n][len] = 0;
+                n++;
+            }
+        }
+        if (*p == L'\n') p++;
+        if (n > 0) cfg->cols[cfg->pages++] = n; /* 빈 줄은 건너뜀 */
+        line++;
+    }
+}
+
+static void ColumnsFilePath(WCHAR *path)
+{
+    WCHAR *slash, *c;
+    GetModuleFileNameW(NULL, path, MAX_PATH);
+    slash = path;
+    for (c = path; *c; c++) if (*c == L'\\') slash = c + 1;
+    lstrcpyW(slash, L"ExcelCopy_columns.txt");
+}
+
+/* 저장된 열 입력을 읽음 (없으면 기본값) */
+static void LoadColumnsText(WCHAR *text, int max)
+{
+    WCHAR path[MAX_PATH];
+    char buf[4096];
+    DWORD got = 0;
+    HANDLE f;
+
+    lstrcpynW(text, DEFAULT_COLUMNS, max);
+    ColumnsFilePath(path);
+    f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE) return;
+    if (ReadFile(f, buf, sizeof(buf) - 1, &got, NULL) && got > 0) {
+        int skip = (got >= 3 && !memcmp(buf, "\xEF\xBB\xBF", 3)) ? 3 : 0; /* 메모장 BOM */
+        int n = MultiByteToWideChar(CP_UTF8, 0, buf + skip, (int)got - skip, text, max - 1);
+        text[n > 0 ? n : 0] = 0;
+    }
+    CloseHandle(f);
+}
+
+static void SaveColumnsText(const WCHAR *text)
+{
+    WCHAR path[MAX_PATH];
+    char buf[4096];
+    DWORD w;
+    HANDLE f;
+    int n = WideCharToMultiByte(CP_UTF8, 0, text, -1, buf, sizeof(buf), NULL, NULL);
+
+    if (n <= 0) return;
+    ColumnsFilePath(path);
+    f = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) return;
+    WriteFile(f, buf, n - 1, &w, NULL);
+    CloseHandle(f);
+}
+
+/* 입력칸 내용이 바뀌면 다시 읽고 저장 */
+static void UpdateColumnsFromEdit(void)
+{
+    WCHAR text[2048];
+    ColumnConfig cfg;
+
+    GetWindowTextW(g_edit, text, 2048);
+    ParseColumns(text, &cfg);
+    EnterCriticalSection(&g_cfgLock);
+    g_cfg = cfg;
+    LeaveCriticalSection(&g_cfgLock);
+    SaveColumnsText(text);
 }
 
 /* ---------------------------------------------------------------- 창 */
@@ -413,12 +527,20 @@ static void SetProgress(int page, int col)
     PostMessageW(g_wnd, WM_APP_UPDATE, 0, 0);
 }
 
+static ColumnConfig g_run;              /* 이번 실행에 쓰는 열 목록 (실행 중 입력칸을 고쳐도 영향 없음) */
+
 static LONG RunMacro(void)
 {
     HWND ppt = FindPpt();
     IDispatch *app;
     LONG row, res = RES_DONE;
     int page, c;
+
+    EnterCriticalSection(&g_cfgLock);
+    g_run = g_cfg;
+    LeaveCriticalSection(&g_cfgLock);
+    Log(L"열 입력: 슬라이드 %d개%s", g_run.pages, g_run.error ? L" (잘못된 입력 있음)" : L"");
+    if (g_run.error || g_run.pages == 0) return RES_BAD_COLS;
 
     Log(L"시작: PPT 창 = %s, PPT 클릭 위치 = %s (%d, %d)",
         ppt ? L"있음" : L"없음", g_hasPptClick ? L"기록됨" : L"없음",
@@ -440,7 +562,7 @@ static LONG RunMacro(void)
 
     if (!ActivateWindow(ppt)) { Release(app); return RES_SWITCH_FAIL; }
 
-    for (page = 1; page <= PAGE_COUNT && res == RES_DONE; page++) {
+    for (page = 1; page <= g_run.pages && res == RES_DONE; page++) {
         Log(L"[슬라이드 %d]", page);
         if (page > 1) {
             if (g_abort) { res = RES_ABORTED; break; }
@@ -451,10 +573,10 @@ static LONG RunMacro(void)
         ClickAt(ppt, g_pptClick);
         Log(L"  PPT 위치 클릭 (%d, %d)", (int)g_pptClick.x, (int)g_pptClick.y);
 
-        for (c = 0; c < COLS_PER_PAGE; c++) {
+        for (c = 0; c < g_run.cols[page - 1]; c++) {
             SetProgress(page, c + 1);
             if (g_abort) { res = RES_ABORTED; break; }
-            if (!ExcelCopyColumn(app, COLUMNS[page - 1][c], row)) { res = RES_COPY_FAIL; break; }
+            if (!ExcelCopyColumn(app, g_run.name[page - 1][c], row)) { res = RES_COPY_FAIL; break; }
 
             if (g_abort) { res = RES_ABORTED; break; }
             if (!ActivateWindow(ppt)) { res = RES_SWITCH_FAIL; break; }
@@ -569,6 +691,10 @@ static void CALLBACK ForegroundProc(HWINEVENTHOOK hook, DWORD event, HWND hwnd,
 
 /* ---------------------------------------------------------------- 화면 */
 
+#define EDIT_Y   158  /* 열 입력칸 위치/높이 */
+#define EDIT_H   110
+#define BTN_Y    (EDIT_Y + EDIT_H + 30)
+
 static void DrawLine(HDC dc, int *y, const WCHAR *text)
 {
     RECT rc;
@@ -581,7 +707,7 @@ static void Paint(HWND hwnd)
 {
     static const WCHAR *results[RES_MAX] = {
         L"PPT 위치 클릭 → 엑셀 셀 클릭 → Ctrl+Shift",
-        L"최근 결과:  3슬라이드 모두 완료",
+        L"최근 결과:  모든 슬라이드 완료",
         L"최근 결과:  엑셀에 연결하지 못했습니다",
         L"최근 결과:  파워포인트 창을 찾지 못했습니다",
         L"최근 결과:  창 전환에 실패했습니다",
@@ -589,6 +715,7 @@ static void Paint(HWND hwnd)
         L"최근 결과:  Esc로 중지했습니다",
         L"최근 결과:  PPT에서 붙여넣을 위치를 먼저 클릭하세요",
         L"최근 결과:  엑셀 선택 셀의 행 번호를 읽지 못했습니다",
+        L"최근 결과:  열 입력을 확인하세요",
     };
     PAINTSTRUCT ps;
     HDC dc = BeginPaint(hwnd, &ps);
@@ -596,7 +723,10 @@ static void Paint(HWND hwnd)
     WCHAR line[256];
     HWND w;
     LONG res = g_result, page = g_page, col = g_col;
+    ColumnConfig *cfg = &g_cfg;
     int y = 10;
+
+    if (g_busy) cfg = &g_run; /* 실행 중에는 실행에 쓰는 목록으로 표시 */
 
     SetBkMode(dc, TRANSPARENT);
 
@@ -606,9 +736,9 @@ static void Paint(HWND hwnd)
         lstrcpyW(line, L"● 일시정지됨  (F9: 재개)");
     } else if (g_busy) {
         SetTextColor(dc, RGB(30, 90, 200));
-        if (page > 0 && page <= PAGE_COUNT && col > 0 && col <= COLS_PER_PAGE)
+        if (page > 0 && page <= cfg->pages && col > 0 && col <= cfg->cols[page - 1])
             wsprintfW(line, L"● 실행 중  슬라이드 %d/%d · %s열  (Esc: 중지)",
-                      (int)page, PAGE_COUNT, COLUMNS[page - 1][col - 1]);
+                      (int)page, cfg->pages, cfg->name[page - 1][col - 1]);
         else
             lstrcpyW(line, L"● 실행 중  (Esc: 중지)");
     } else {
@@ -624,7 +754,7 @@ static void Paint(HWND hwnd)
     DrawLine(dc, &y, results[res]);
 
     if (g_row > 0)
-        wsprintfW(line, L"엑셀 행:  %ld  (D/AA/AX → K/AH/BE → S/AP/BM)", g_row);
+        wsprintfW(line, L"엑셀 행:  %ld", g_row);
     else
         lstrcpyW(line, L"엑셀 행:  실행할 때 선택된 셀에서 읽음");
     DrawLine(dc, &y, line);
@@ -641,6 +771,26 @@ static void Paint(HWND hwnd)
         lstrcpyW(line, L"PPT 클릭 위치:  없음 - PPT에서 붙여넣을 칸을 클릭하세요");
     DrawLine(dc, &y, line);
 
+    /* 열 입력 안내 */
+    y += 6;
+    SelectObject(dc, g_fontBold);
+    DrawLine(dc, &y, L"복사할 열  (한 줄 = 한 슬라이드, 쉼표로 구분)");
+    SelectObject(dc, g_font);
+    y = EDIT_Y + EDIT_H + 4;
+    if (cfg->error) {
+        SetTextColor(dc, RGB(200, 60, 40));
+        wsprintfW(line, L"%d번째 줄에 잘못된 열 이름이 있습니다 (영문 1~3글자, 예: D, AA)", cfg->error);
+    } else if (cfg->pages == 0) {
+        SetTextColor(dc, RGB(200, 60, 40));
+        lstrcpyW(line, L"열을 입력하세요 (예: D, AA, AX)");
+    } else {
+        int i, total = 0;
+        for (i = 0; i < cfg->pages; i++) total += cfg->cols[i];
+        SetTextColor(dc, RGB(90, 90, 90));
+        wsprintfW(line, L"슬라이드 %d개 · 열 %d개  (자동 저장됨)", cfg->pages, total);
+    }
+    DrawLine(dc, &y, line);
+
     EndPaint(hwnd, &ps);
 }
 
@@ -648,12 +798,21 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 {
     switch (msg) {
     case WM_CREATE: {
+        WCHAR text[2048];
         HWND b1 = CreateWindowW(L"BUTTON", L"일시정지 (F9)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                12, 136, 194, 30, hwnd, (HMENU)ID_BTN_PAUSE, NULL, NULL);
+                                12, BTN_Y, 194, 30, hwnd, (HMENU)ID_BTN_PAUSE, NULL, NULL);
         HWND b2 = CreateWindowW(L"BUTTON", L"종료", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                218, 136, 194, 30, hwnd, (HMENU)ID_BTN_EXIT, NULL, NULL);
+                                218, BTN_Y, 194, 30, hwnd, (HMENU)ID_BTN_EXIT, NULL, NULL);
         SendMessageW(b1, WM_SETFONT, (WPARAM)g_font, TRUE);
         SendMessageW(b2, WM_SETFONT, (WPARAM)g_font, TRUE);
+
+        LoadColumnsText(text, 2048);
+        g_edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", text,
+                                 WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE |
+                                 ES_AUTOVSCROLL | ES_WANTRETURN | ES_UPPERCASE,
+                                 12, EDIT_Y, 400, EDIT_H, hwnd, (HMENU)ID_EDIT_COLS, NULL, NULL);
+        SendMessageW(g_edit, WM_SETFONT, (WPARAM)g_font, TRUE);
+        UpdateColumnsFromEdit();
         SetTimer(hwnd, 1, 1000, NULL); /* 창 이름 표시 갱신 */
         return 0;
     }
@@ -667,15 +826,28 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case ID_BTN_EXIT:
             DestroyWindow(hwnd);
             return 0;
+        case ID_EDIT_COLS:
+            if (HIWORD(wParam) == EN_CHANGE) {
+                UpdateColumnsFromEdit();
+                InvalidateRect(hwnd, NULL, TRUE);
+            }
+            return 0;
         }
         break;
     case WM_APP_UPDATE:
     case WM_TIMER:
         InvalidateRect(hwnd, NULL, TRUE);
         return 0;
-    case WM_MOUSEACTIVATE:
-        /* 창을 클릭해도 활성화되지 않게 해서 작업 중인 창이 계속 활성 상태로 남도록 함 */
+    case WM_MOUSEACTIVATE: {
+        /* 열 입력칸을 클릭했을 때만 창을 활성화해서 글자를 입력할 수 있게 하고,
+         * 나머지(버튼 등)는 클릭해도 작업 중인 창이 계속 활성 상태로 남도록 함 */
+        POINT pt;
+        GetCursorPos(&pt);
+        ScreenToClient(hwnd, &pt);
+        if (ChildWindowFromPoint(hwnd, pt) == g_edit)
+            return MA_ACTIVATE;
         return MA_NOACTIVATE;
+    }
     case WM_PAINT:
         Paint(hwnd);
         return 0;
@@ -691,11 +863,13 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show)
 {
     WNDCLASSW wc;
     MSG msg;
-    RECT rc = { 0, 0, 424, 178 };
+    RECT rc = { 0, 0, 424, BTN_Y + 42 };
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-    DWORD exStyle = WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_APPWINDOW;
+    DWORD exStyle = WS_EX_TOPMOST | WS_EX_APPWINDOW; /* 활성화 여부는 WM_MOUSEACTIVATE에서 결정 */
     HANDLE mutex;
     (void)prev; (void)cmd; (void)show;
+
+    InitializeCriticalSection(&g_cfgLock);
 
     /* 중복 실행 방지 */
     mutex = CreateMutexW(NULL, TRUE, L"ExcelCopy_SingleInstance");
